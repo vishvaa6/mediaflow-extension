@@ -1,0 +1,10 @@
+{
+  "name": "mediaflow-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/core.test.mjs tests/hls.test.mjs tests/site-compat.test.mjs && node tests/background-smoke.mjs",
+    "test:browser": "node tests/browser.test.cjs && node tests/profile-selection-browser.test.cjs && node tests/hls-browser.test.cjs"
+  }
+}

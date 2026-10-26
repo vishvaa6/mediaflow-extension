@@ -1,0 +1,86 @@
+{
+  "manifest_version": 3,
+  "default_locale": "en",
+  "name": "__MSG_extensionName__",
+  "version": "1.0.0",
+  "description": "__MSG_extensionDescription__",
+  "permissions": [
+    "storage",
+    "downloads",
+    "offscreen",
+    "declarativeNetRequest",
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/pages/background/index.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/pages/popup/index.html",
+    "default_icon": "icon-34.png"
+  },
+  "icons": {
+    "34": "icon-34.png",
+    "128": "icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "run_at": "document_start",
+      "matches": [
+        "http://*/*",
+        "https://*/*",
+        "<all_urls>"
+      ],
+      "js": [
+        "src/pages/contentInjected/index.js"
+      ],
+      "css": [
+        "assets/css/contentStyle1792748363563.chunk.css"
+      ]
+    },
+    {
+      "run_at": "document_start",
+      "matches": [
+        "https://*.redtube.com/*",
+        "https://*.iwgsqufx.cc/*",
+        "https://*.roufquunbu.cc/*",
+        "https://*.ahievheved.cc/*",
+        "https://*.nbsito.top/*",
+        "https://*.tideember.cc/*",
+        "https://*.momodrift.top/*",
+        "https://*.zuzuspot.top/*",
+        "https://*.zuzucast.top/*",
+        "https://*.glowcanvas.cc/*",
+        "https://*.eyeonneb.cc/*"
+      ],
+      "js": [
+        "src/pages/injectedMain/index.js"
+      ],
+      "world": "MAIN"
+    },
+    {
+      "run_at": "document_start",
+      "matches": ["http://*/*", "https://*/*"],
+      "all_frames": true,
+      "js": ["src/pages/contentDetection/index.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/js/*.js",
+        "assets/css/*.css",
+        "js/*.js",
+        "icon-128.png",
+        "icon-34.png"
+      ],
+      "matches": [
+        "*://*/*"
+      ]
+    }
+  ]
+}

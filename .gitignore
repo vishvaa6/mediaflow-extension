@@ -1,0 +1,15 @@
+# Generated project maps and local verification output
+graphify-out/
+test-results/
+dist/
+
+# Local dependencies, editor state and credentials
+node_modules/
+__pycache__/
+.DS_Store
+.env
+.env.*
+.codex/
+.agents/
+.vscode/
+*.log
