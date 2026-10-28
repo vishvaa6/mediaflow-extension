@@ -1,8 +1,18 @@
+import {xPost} from './x-media.js';
+import {missavVideoPage} from './missav-media.js';
+
 export function videoKey(value) {
   try {
     const url = new URL(value);
     if (!/^https?:$/.test(url.protocol)) return '';
-    const host = url.hostname.toLowerCase().replace(/^www\./,'');
+    const post=xPost(value);
+    if(post)return `x:${post.id}:video:${post.index}`;
+    let host = url.hostname.toLowerCase().replace(/^www\./,'');
+    const missav=missavVideoPage(value);
+    if(missav)return 'missav:'+new URL(missav).pathname.split('/').pop().toLowerCase();
+    if(/^(?:[^.]+\.)?pornhub\.(?:com|org)$|^pornhubpremium\.com$/.test(host))host='pornhub';
+    if(/^(?:xvideos\.com|xvv1deos\.com|xnxx\.(?:com|es))$/.test(host))host=host.startsWith('xnxx')?'xnxx':'xvideos';
+    if(/^xhamster(?:\d+)?\.(?:com|desi)$/.test(host))host='xhamster';
     const viewkey = url.searchParams.get('viewkey');
     if (viewkey) return `${host}:viewkey:${viewkey}`;
     const xv = url.pathname.match(/^\/(?:video\.([a-z0-9_-]+)|video(\d+))(?:\/|$)/i);

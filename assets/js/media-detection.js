@@ -1,6 +1,8 @@
 import {extractMedia,mediaFormat,mediaHeight} from './media-extraction.js';
 import {mediaHeaders} from './media-headers.js';
 import {getVideoMetadata} from './video-details.js';
+import {installXDetection} from './x-detection.js';
+import {installMissavDetection} from './missav-detection.js';
 
 export function detectDocumentMedia(doc=document,baseUrl=location.href,timing=performance) {
   const found=new Map();
@@ -22,19 +24,24 @@ export function detectDocumentMedia(doc=document,baseUrl=location.href,timing=pe
 }
 
 export function installMediaDetection() {
-  let timer,last='',currentPage=location.href;
-  const snapshot=()=>detectDocumentMedia();
+  let timer,last='',currentPage=location.href,xDetection;
+  const snapshot=()=>xDetection ? xDetection.snapshot() : detectDocumentMedia();
   const report=()=>{
     clearTimeout(timer);
+    timer=null;
     if(location.href!==currentPage){currentPage=location.href;last='';}
-    const result=snapshot(),key=JSON.stringify([currentPage,result.videoInfos]);
+    const result=snapshot(),key=JSON.stringify([currentPage,result.videoInfos,result.detectionError,result.detectionStatus]);
     if(key===last)return;last=key;
     chrome.runtime.sendMessage({type:'media-detection-report',...result}).catch(()=>{});
   };
-  const schedule=()=>{clearTimeout(timer);timer=setTimeout(report,250);};
+  const schedule=()=>{if(xDetection){if(!timer)timer=setTimeout(report,150);}else{clearTimeout(timer);timer=setTimeout(report,250);}};
+  xDetection=installXDetection(schedule) || installMissavDetection(schedule);
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id && sender.id!==chrome.runtime.id)return false;
-    if(message.command==='get_generic_video_info' && window.top===window){respond(snapshot());return false;}
+    if(message.command==='get_generic_video_info' && window.top===window){
+      if(xDetection && message.refresh)xDetection.refresh(true);
+      respond(snapshot());return false;
+    }
     return false;
   });
   document.addEventListener('loadedmetadata',schedule,true);

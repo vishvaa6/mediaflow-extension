@@ -1,6 +1,9 @@
 import {decodeMediaText,mediaFormat} from './media-extraction.js';
+import {isXPage,fetchXMedia} from './x-media.js';
+import {isMissavPage,extractMissavDefinitions} from './missav-media.js';
 
 export async function siteDefinitions(html,pageUrl,fetchText) {
+  if(isXPage(pageUrl))return fetchXMedia(pageUrl,fetchText);
   const page=new URL(pageUrl),host=page.hostname.replace(/^www\./,'');
   if(host==='123av.com'){
     let embed;
@@ -15,17 +18,7 @@ export async function siteDefinitions(html,pageUrl,fetchText) {
     if(typeof stream!=='string')throw Error('The 123av player returned no available stream. Open the video page and start playback, then retry.');
     return [{videoUrl:new URL(decodeMediaText(stream),embed).href,format:'m3u8',quality:0,headers:{Origin:embed.origin,Referer:embed.origin+'/'}}];
   }
-  if(/^missav\.(?:ws|live|com)$/.test(host)){
-    let url=html.match(/https?:\/\/surrit\.com\/[a-f0-9-]{36}\/playlist\.m3u8/i)?.[0];
-    if(!url){
-      const packed=html.match(/m3u8\|([a-f0-9|]+)\|com\|surrit\|https\|video/i)?.[1];
-      const id=packed?.split('|').filter(Boolean).reverse().join('-');
-      if(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id || ''))url=`https://surrit.com/${id}/playlist.m3u8`;
-    }
-    const definitions=url ? [{videoUrl:url,format:'m3u8',quality:0}] : [];
-    if(url)for(const quality of new Set([...html.matchAll(/\b(\d{3,4})p\b/g)].map(match=>match[1])))definitions.push({videoUrl:url.replace(/playlist\.m3u8$/,quality+'p/video.m3u8'),quality,format:'m3u8'});
-    return definitions;
-  }
+  if(isMissavPage(pageUrl))return extractMissavDefinitions(html,pageUrl);
   if(host==='tangxinvlog.app'){
     const image=html.match(/<meta\b[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i)?.[1];
     const prefix=decodeMediaText(image).match(/^(https?:\/\/[^/]+\/videos\/\d+)\/cover\.jpg/i)?.[1];

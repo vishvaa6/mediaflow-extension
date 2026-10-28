@@ -1,5 +1,7 @@
 import {parseProfileDocument} from '../../../assets/js/profile-scanner.js';
 import {getVideoMetadata} from '../../../assets/js/video-details.js';
+import {installOffscreenDownloads} from '../../../assets/js/offscreen-downloads.js';
+installOffscreenDownloads();
 let keepaliveTimer;
 const keepaliveJobs = new Set();
 chrome.runtime.onMessage.addListener((message,sender,respond) => {

@@ -13,6 +13,20 @@ export function creatorRoot(value) {
   return match ? match[0].replace(/\/$/, '') : url.pathname.replace(/\/videos(?:\/.*)?$|\/\d+\/?$/i, '').replace(/\/$/, '');
 }
 
+export function cardOwner(link,baseUrl=link.ownerDocument.baseURI) {
+  const known=link.closest('li.videoBox, .pcVideoListItem, .thumb-block, .thumb-list__item, [data-video-id], .videoUList > li, .video-card, .video-item, article');
+  if(known)return known;
+  // Thumbnail, title and duration links must have the same visual owner.
+  let parent=link.parentElement,candidate=link;
+  for(let depth=0;parent && depth<4;depth++,parent=parent.parentElement){
+    if(parent.matches('body,main,section,ul,ol,nav'))break;
+    if(parent.querySelector('img,video') && [...parent.querySelectorAll('a[href]')].filter(a=>/view_video\.php|\/videos?[./]/.test(a.getAttribute('href'))).every(a=>{
+      try{const one=new URL(a.getAttribute('href'),baseUrl),two=new URL(link.getAttribute('href'),baseUrl);return one.pathname===two.pathname && one.searchParams.get('viewkey')===two.searchParams.get('viewkey');}catch{return false;}
+    }))candidate=parent;
+    else if(parent.querySelector('img,video'))break;
+  }
+  return candidate;
+}
 export function profileVideoElements(doc,baseUrl) {
   const base = new URL(baseUrl), result = [];
   for (const link of doc.querySelectorAll('a[href*="view_video.php"], a[href*="/video"]')) {
@@ -20,7 +34,7 @@ export function profileVideoElements(doc,baseUrl) {
     if (!url) continue;
     const parsed = new URL(url);
     if (parsed.origin !== base.origin || !(/view_video\.php/.test(parsed.pathname) && parsed.searchParams.has('viewkey') || /\/video(?:\.[\w-]+|\d[\w-]*)(?:\/|$)|\/videos?\/(?:[\w-]+\/)*\d[\w-]*(?:\/|$)/i.test(parsed.pathname))) continue;
-    const card = link.closest('li.videoBox, .pcVideoListItem, .thumb-block, .thumb-list__item, [data-video-id], .videoUList > li') || link;
+    const card = cardOwner(link,baseUrl);
     if (!card.closest('.recommended, .recommendations, #recommendedVideos, .related-videos')) result.push({link,card,url,parsed});
   }
   return result;
@@ -47,7 +61,9 @@ export function parseProfileDocument(doc, baseUrl) {
     const id = parsed.searchParams.get('viewkey') || parsed.pathname.replace(/\/$/, '');
     const img = card.querySelector('img') || link.querySelector('img');
     const titleEl = card.querySelector('.title a, a.title, .videoTitle, [data-title]');
-    const title = clean(titleEl?.getAttribute('title') || titleEl?.textContent || link.getAttribute('title') || img?.getAttribute('alt') || link.textContent);
+    const titleText=titleEl?.querySelector('h2,h3,span:not(.duration)')?.textContent || titleEl?.textContent;
+    const titleCandidates=[titleEl?.getAttribute('title'),titleEl?.getAttribute('data-title'),titleText,...[...card.querySelectorAll('a[title],a[href]')].map(node=>node.getAttribute('title')),img?.getAttribute('alt'),...[...card.querySelectorAll('a[href]')].map(node=>node.textContent),link.getAttribute('title'),link.textContent].map(clean);
+    const title=titleCandidates.find(value=>value && !/^(?:\d+:){1,2}\d+(?:\s+\S+)?$/.test(value) && !/^(?:select|selected|downloaded|not downloaded)$/i.test(value)) || '';
     const thumbnails = imageUrls(img);
     const item = {id, url, title: title || `Video ${id}`, thumbnail: thumbnails[0] || '', thumbnails,
       duration: clean(card.querySelector('.duration, [data-role="video-duration"]')?.textContent),
