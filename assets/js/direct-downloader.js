@@ -1,5 +1,6 @@
 import {needsSourceRefresh,httpError} from './source-refresh.js';
 import {exactRequestCondition} from './media-headers.js';
+import {waitForData,networkError,retryAfterMs} from './network.js';
 
 // Streaming downloads commit the partial OPFS file before acknowledging a pause.
 export class DirectDownloader {
@@ -8,7 +9,7 @@ export class DirectDownloader {
   pauseRequested = false;
   destroyed = false;
   activeRuleIds = [];
-  constructor({saveFile, fetcher = fetch, storage = navigator.storage, networkTimeout = 60000, resolveSource, onSourceRefreshed} = {}) {
+  constructor({saveFile, fetcher = fetch, storage = navigator.storage, networkTimeout = 60000, headerBridge, resolveSource, onSourceRefreshed} = {}) {
     this.saveFile = saveFile;
     // Native Window/Worker fetch requires its original global receiver.
     this.fetcher = (url, options) => fetcher.call(globalThis, url, options);
@@ -16,6 +17,7 @@ export class DirectDownloader {
     this.networkTimeout = networkTimeout;
     this.resolveSource = resolveSource;
     this.onSourceRefreshed = onSourceRefreshed;
+    this.headerBridge=headerBridge;
   }
   getBytesReceived() { return this.bytesReceived; }
   start(options) {
@@ -34,13 +36,13 @@ export class DirectDownloader {
     for (const key of ['Origin','Referer','Cookie']) requestHeaders.delete(key);
     if (offset) requestHeaders.set('Range',`bytes=${start}-`);
     const response = await this.waitForNetwork(this.fetcher(url,{headers:requestHeaders,credentials:'include',cache:'no-store',signal:this.abortController.signal}));
-    if (!response.ok) { await response.body?.cancel(); throw httpError(response.status); }
+    if (!response.ok) { await response.body?.cancel(); throw Object.assign(httpError(response.status),{code:'HTTP',retryAfter:retryAfterMs(response.headers.get('Retry-After'))}); }
     return response;
   }
   check() {
     if (this.pauseRequested || this.destroyed || this.abortController.signal.aborted) throw this.abortController.signal.reason || new DOMException('Paused','AbortError');
   }
-  async run({url, fileName, headers = {}, opfsFileName, totalBytes = 0, onProgress, onComplete, onError, downloadSubdir, format = 'mp4'}) {
+  async run({url, fileName, headers = {}, opfsFileName, totalBytes = 0, onProgress, onComplete, onError, onFailure, downloadSubdir, format = 'mp4'}) {
     let writer, reader;
     this.abortController = new AbortController();
     try {
@@ -72,7 +74,7 @@ export class DirectDownloader {
           this.check();
           response = await this.openResponse(url,headers,requestStart,offset);
         } catch (refreshError) {
-          throw Error(`${error.message}. Link refresh failed: ${refreshError.message}. Cached data was kept; retry to continue.`);
+          throw Object.assign(Error(`${error.message}. Link refresh failed: ${refreshError.message}. Cached data was kept; retry to continue.`),{code:refreshError.code,status:refreshError.status,retryAfter:refreshError.retryAfter});
         }
       }
       if (this.pauseRequested || this.destroyed) { await response.body?.cancel(); return; }
@@ -126,12 +128,12 @@ export class DirectDownloader {
       await writer.close();
       writer = null;
       if (this.pauseRequested || this.destroyed) return;
-      if (total && this.bytesReceived < total) throw Error('The connection ended before the complete file arrived. Resume to continue.');
+      if (total && this.bytesReceived < total) throw Object.assign(Error('The connection ended before the complete file arrived. Resume to continue.'),{code:'NETWORK'});
       await this.finish({fileName, format, downloadSubdir, onProgress, onComplete});
     } catch (error) {
       // Writable abort discards every chunk since open; close preserves them.
       if (writer) { await writer.close().catch(() => {}); writer = null; }
-      if (!this.pauseRequested && !this.destroyed) onError?.(error?.message || String(error));
+      if (!this.pauseRequested && !this.destroyed) {if(onFailure)onFailure(networkError(error));else onError?.(error?.message || String(error));}
     } finally {
       await reader?.cancel().catch(() => {});
       await this.cleanupHeaderRules();
@@ -139,12 +141,7 @@ export class DirectDownloader {
     }
   }
   async waitForNetwork(promise) {
-    let timer;
-    try {
-      return await Promise.race([promise,new Promise((resolve,reject) => {
-        timer = setTimeout(() => { const error = Error('The connection timed out. Resume or retry the download.'); this.abortController.abort(error); reject(error); },this.networkTimeout);
-      })]);
-    } finally { clearTimeout(timer); }
+    return waitForData(promise,this.abortController,this.networkTimeout);
   }
   async finish({fileName, format, downloadSubdir, onProgress, onComplete}) {
     if (this.pauseRequested || this.destroyed) return;
@@ -165,6 +162,7 @@ export class DirectDownloader {
     if (removeFile && this.opfsFileName) await this.root?.removeEntry(this.opfsFileName).catch(() => {});
   }
   async registerHeaderRules(url, headers) {
+    if(this.headerBridge){const id=await this.headerBridge.add(url,headers);if(id)this.activeRuleIds.push(id);return;}
     const requestHeaders = Object.entries(headers).filter(([key, value]) => /^(Origin|Referer|Cookie)$/i.test(key) && typeof value === 'string' && value)
       .map(([header,value]) => ({operation:'set',header,value}));
     if (!requestHeaders.length) return;
@@ -174,6 +172,7 @@ export class DirectDownloader {
   }
   async cleanupHeaderRules() {
     const removeRuleIds = this.activeRuleIds.splice(0);
+    if(this.headerBridge){await Promise.all(removeRuleIds.map(id=>this.headerBridge.remove(id).catch(()=>{})));return;}
     if (removeRuleIds.length) await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds}).catch(() => {});
   }
 }

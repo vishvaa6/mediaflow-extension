@@ -113,8 +113,9 @@ test('storage serializes overlapping enqueues, updates and removals without losi
   assert.equal((await queue.get()).tasks.length,15);assert.ok((await queue.get()).tasks.every(task=>task.status==='paused'));
 });
 
-async function queueHarness(tasks,limit=1,initialHistory=[]){
+async function queueHarness(tasks,limit=1,initialHistory=[],nativeDownloads=[]){
   globalThis.chrome=mock=chromeMock();
+  if(nativeDownloads.length)mock.downloads.search=async({id})=>nativeDownloads.filter(item=>item.id===id);
   let list=structuredClone(tasks);
   const engines=[];
   class Hls {
@@ -127,12 +128,51 @@ async function queueHarness(tasks,limit=1,initialHistory=[]){
   }
   let nextId=100;
   const queueStorage={get:async()=>({tasks:structuredClone(list)}),enqueue:async value=>{const id=String(nextId++);list.push({...value,id,status:'queued',createdAt:Number(id),opfsCacheFileName:id});return id;},updateTask:async(id,value)=>{list=list.map(t=>t.id===id?{...t,...value}:t);},removeTask:async id=>{list=list.filter(t=>t.id!==id);}};
-  const historyRecords=[...initialHistory];
-  const manager=installQueueManager({queueStorage,historyStorage:{get:async()=>({records:historyRecords.map(([fileName,url,pageUrl,metadata])=>({fileName,url,pageUrl,...metadata}))}),addRecord:async(...args)=>historyRecords.push(args)},settingsStorage:{get:async()=>({maxConcurrentTasks:limit}),subscribe(){}},HlsDownloader:Hls,registerBlob(){},bindBlob(){},clearBlob(){},formatFilename:n=>n,withSubdir:n=>n});
+  const historyRecords=[...initialHistory],subscribers=[];
+  const manager=installQueueManager({queueStorage,historyStorage:{get:async()=>({records:historyRecords.map(([fileName,url,pageUrl,metadata])=>({fileName,url,pageUrl,...metadata}))}),addRecord:async(...args)=>historyRecords.push(args)},settingsStorage:{get:async()=>({maxConcurrentTasks:limit}),subscribe:fn=>subscribers.push(fn)},HlsDownloader:Hls,registerBlob(){},bindBlob(){},clearBlob(){},formatFilename:n=>n,withSubdir:n=>n});
   await manager.ready;
-  return {manager,engines,queueStorage,historyRecords,tasks:()=>list};
+  return {manager,engines,queueStorage,historyRecords,tasks:()=>list,setLimit:async value=>{limit=value;for(const fn of subscribers)fn();await manager.schedule();}};
 }
 const task=id=>({id,url:`https://example.test/${id}.m3u8`,format:'m3u8',status:'queued',createdAt:Number(id),opfsCacheFileName:id});
+test('resuming a paused browser save waits behind the same global concurrency limit',async()=>{
+  const h=await queueHarness([task('1'),task('2')]);
+  h.engines[0].cb.onProgress({progress:95,bytesReceived:100,isFileDownloading:true,chromeDownloadId:42});
+  await h.manager.pause('1');await until(()=>h.engines.length===2);
+  await h.manager.resume('1');assert.deepEqual(mock.resumed,[]);
+  assert.equal(h.tasks().find(task=>task.id==='1').status,'queued');
+  h.engines[1].cb.onComplete();await until(()=>mock.resumed.includes(42));
+  assert.equal(h.tasks().filter(task=>task.status==='downloading').length,1);await h.manager.remove('1');
+});
+test('a recovered paused save obeys capacity and an interrupted save releases its slot for retry',async()=>{
+  const h=await queueHarness([{...task('1'),status:'paused',chromeDownloadId:42,cachedBytes:123,outputReady:true,outputExtension:'mp4',outputCacheFileName:'one.mp4'},task('2')],1,[],[{id:42,state:'in_progress',paused:true}]);
+  await h.manager.resume('1');assert.deepEqual(mock.resumed,[]);
+  h.engines[0].cb.onComplete();await until(()=>mock.resumed.includes(42));
+  mock.downloads.onChanged.emit({id:42,state:{current:'interrupted'},error:{current:'NETWORK_FAILED'}});
+  await until(()=>h.tasks().find(task=>task.id==='1')?.retryCount===1);
+  assert.equal(h.manager.active.has('1'),false);
+  const retry=h.tasks().find(task=>task.id==='1');assert.equal(retry.status,'queued');assert.equal(retry.outputReady,true);assert.equal(retry.outputCacheFileName,'one.mp4');
+  await h.manager.remove('1');
+});
+test('simultaneous resumes and changing the concurrency limit cannot oversubscribe the queue',async()=>{
+  const h=await queueHarness([task('1'),{...task('2'),status:'paused'},{...task('3'),status:'paused'}]);
+  await Promise.all([h.manager.resume('2'),h.manager.resume('3')]);
+  assert.equal(h.engines.length,1);assert.equal(h.tasks().filter(task=>task.status==='queued').length,2);
+  await h.setLimit(2);await until(()=>h.engines.length===2);
+  await h.setLimit(1);h.engines[0].cb.onComplete();await until(()=>h.tasks().length===2);
+  await h.manager.schedule();assert.equal(h.engines.length,2);
+  h.engines[1].cb.onComplete();await until(()=>h.engines.length===3);
+  await h.manager.remove('3');
+});
+test('a transient timeout queues a bounded retry, retains identity, and frees a slot',async()=>{
+  const h=await queueHarness([task('1'),task('2')]);
+  h.engines[0].cb.onError(Object.assign(Error('signal timed out'),{code:'TIMEOUT'}));
+  await until(()=>h.engines.length===2);
+  const retry=h.tasks().find(task=>task.id==='1');
+  assert.equal(retry.status,'queued');assert.equal(retry.retryCount,1);assert.ok(retry.nextRetryAt>Date.now());assert.equal(retry.opfsCacheFileName,'1');
+  assert.equal(h.tasks().find(task=>task.id==='2').status,'downloading');
+  await h.manager.pause('1');h.engines[1].cb.onComplete();await until(()=>h.tasks().length===1);
+  await h.manager.schedule();assert.equal(h.engines.length,2);await h.manager.remove('1');
+});
 test('pause releases a slot; resume waits for capacity and reuses the paused engine',async()=>{
   const h=await queueHarness([task('1'),task('2')]);
   assert.equal(h.engines.length,1);
@@ -274,7 +314,7 @@ test('Clear results waits for a late scanned page, resets saved results and sele
   }finally{globalThis.fetch=originalFetch;await h.manager.remove('1');}
 });
 
-test('profile batch resolves and enqueues in the background, with visible failure counts',async()=>{
+test('profile batch queues unresolved pages immediately and exposes per-task resolution errors only after a slot opens',async()=>{
   const originalFetch=globalThis.fetch;
   const h=await queueHarness([]);
   const html='var flashvars_123 = '+JSON.stringify({video_title:'Batch title',mediaDefinitions:[{format:'hls',quality:1080,videoUrl:'https://cdn.test/playlist.m3u8'}]})+';';
@@ -284,9 +324,13 @@ test('profile batch resolves and enqueues in the background, with visible failur
     assert.equal(response.success,true);
     await until(async()=>((await mock.storage.local.get('profileBatchState')).profileBatchState?.status==='complete'));
     const batch=(await mock.storage.local.get('profileBatchState')).profileBatchState;
-    assert.equal(batch.enqueued,1);assert.equal(batch.failed,1);assert.equal(batch.processed,2);
-    assert.match(h.tasks()[0].fileName,/Creator\/Batch title/);
-    assert.match(batch.errors[0].error,/No supported/);
+    assert.equal(batch.enqueued,2);assert.equal(batch.failed,0);assert.equal(batch.processed,2);
+    await until(()=>h.engines.length===1);
+    assert.match(h.tasks()[0].fileName,/Creator\/One/);
+    assert.equal(h.tasks()[1].url,'');assert.equal(h.tasks()[1].status,'queued');
+    h.engines[0].cb.onComplete();
+    await until(()=>h.tasks().some(task=>task.status==='error'));
+    assert.match(h.tasks()[0].error,/No supported/);
     for(const task of h.tasks())await h.manager.remove(task.id);
   }finally{globalThis.fetch=originalFetch;}
 });
@@ -331,11 +375,11 @@ test('Cancel aborts resolution, removes active and queued creator batch tasks, a
     return Promise.resolve(new Response(url.includes('.m3u8')?'#EXTM3U\n#EXTINF:1,\nseg.ts\n#EXT-X-ENDLIST':html));
   };
   try{
-    const started=await command({type:'profile-batch-start',profileUrl:'https://example.test/model/alex/videos',profileName:'Alex',quality:'best',videos:[{title:'One',url:'https://example.test/one'},{title:'Two',url:'https://example.test/two'},{title:'Pending',url:'https://example.test/pending'}]});
-    await until(()=>pending);await until(()=>h.tasks().filter(task=>task.batchId).length===2);
+    const started=await command({type:'profile-batch-start',profileUrl:'https://example.test/model/alex/videos',profileName:'Alex',quality:'best',videos:[{title:'Pending',url:'https://example.test/pending'},{title:'One',url:'https://example.test/one'},{title:'Two',url:'https://example.test/two'}]});
+    await until(()=>pending);await until(()=>h.tasks().filter(task=>task.batchId).length===3);
     const result=await command({type:'profile-batch-cancel',batchId:started.batchId,profileKey:'example.test/model/alex'});
-    assert.equal(result.success,true);assert.equal(result.cancelled,2);assert.equal(aborted,true);
-    assert.deepEqual(h.tasks().map(task=>task.id),['1']);assert.equal(h.engines[0].cacheDeleted,undefined);assert.equal(h.engines[1].cacheDeleted,true);assert.equal(h.historyRecords.length,0);
+    assert.equal(result.success,true);assert.equal(result.cancelled,3);assert.equal(aborted,true);
+    assert.deepEqual(h.tasks().map(task=>task.id),['1']);assert.equal(h.engines[0].cacheDeleted,undefined);assert.equal(h.engines.length,1);assert.equal(h.historyRecords.length,0);
     assert.equal((await mock.storage.local.get('profileBatchState')).profileBatchState.status,'cancelled');
     await h.manager.remove('1');
   }finally{globalThis.fetch=originalFetch;}
@@ -383,7 +427,7 @@ test('profile batches skip downloaded pages before fetching, even when submitted
   } finally {globalThis.fetch=originalFetch;}
 });
 
-test('a completion during page resolution is rechecked before enqueue',async()=>{
+test('a completion during queued page resolution is rechecked before starting a transfer',async()=>{
   const originalFetch=globalThis.fetch,h=await queueHarness([]);
   const page='https://example.test/view_video.php?viewkey=race';
   const html='var flashvars_1 = '+JSON.stringify({mediaDefinitions:[{format:'hls',quality:720,videoUrl:'https://cdn.test/video.m3u8'}]})+';';
@@ -395,7 +439,8 @@ test('a completion during page resolution is rechecked before enqueue',async()=>
     await command({type:'profile-batch-start',profileName:'Creator',videos:[{title:'Race video',url:page}]});
     await until(async()=>((await mock.storage.local.get('profileBatchState')).profileBatchState?.status==='complete'));
     const batch=(await mock.storage.local.get('profileBatchState')).profileBatchState;
-    assert.equal(batch.skipped,1);assert.equal(batch.enqueued,0);assert.equal(batch.processed,1);
+    assert.equal(batch.enqueued,1);assert.equal(batch.processed,1);
+    await until(()=>h.tasks().length===0);
     assert.equal(h.tasks().length,0);assert.equal(h.engines.length,0);
   } finally {globalThis.fetch=originalFetch;}
 });

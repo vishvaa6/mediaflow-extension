@@ -41,7 +41,7 @@
   },
   "channelFolderHint": {
     "description": "Hint for the slash-as-folder toggle",
-    "message": "On: a/b creates a folder · Off: saves as a--b"
+    "message": "On: a/b creates a folder Â· Off: saves as a--b"
   },
   "popupQualityLabel": {
     "description": "Quality label",
@@ -57,11 +57,11 @@
   },
   "popupActionDownloading": {
     "description": "Downloading label",
-    "message": "Downloading…"
+    "message": "Downloadingâ€¦"
   },
   "popupActionQueued": {
     "description": "Queued label",
-    "message": "Queued…"
+    "message": "Queuedâ€¦"
   },
   "popupActionPaused": {
     "description": "Paused label",
@@ -249,7 +249,7 @@
   },
   "fileSaving": {
     "description": "Saving label",
-    "message": "Saving…"
+    "message": "Savingâ€¦"
   },
   "historyTitle": {
     "description": "History title with count substitution",
@@ -281,11 +281,11 @@
   },
   "tabVideoQueue": {
     "description": "Tab label for video and queue",
-    "message": "Video & Queue"
+    "message": "Downloads"
   },
   "tabProfileVideos": {
     "description": "Tab label for profile videos",
-    "message": "Profile Videos"
+    "message": "Library"
   },
   "tabSettings": {
     "description": "Tab label for settings",

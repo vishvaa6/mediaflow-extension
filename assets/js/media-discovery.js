@@ -1,4 +1,6 @@
 import {mediaHeaders} from './media-headers.js';
+import {isXPage,xPost,xMediaUrl} from './x-media.js';
+import {isMissavPage,missavVideoPage,missavMediaUrl} from './missav-media.js';
 
 // Transient per-tab discovery only; no browsing log or cookies are persisted.
 export function createMediaDiscovery() {
@@ -14,7 +16,12 @@ export function createMediaDiscovery() {
       const videos=[];
       for(const video of (message.videoInfos || []).slice(0,64)){
         try{const url=new URL(video.videoUrl);if(!/^https?:$/.test(url.protocol) || !['mp4','webm','m3u8'].includes(video.format))continue;
-          videos.push({videoUrl:url.href,quality:video.quality,format:video.format,headers:mediaHeaders(video.headers,frameUrl)});
+          const sourcePost=xPost(video.pageUrl);
+          if(isXPage(pageUrl) && (!sourcePost || !xMediaUrl(url.href)))continue;
+          const missavSource=missavVideoPage(video.pageUrl);
+          if(isMissavPage(pageUrl) && (!missavSource || !missavMediaUrl(url.href)))continue;
+          videos.push({videoUrl:url.href,quality:video.quality,format:video.format,headers:mediaHeaders(video.headers,frameUrl),
+            ...(sourcePost || missavSource ? {pageUrl:sourcePost?.pageUrl || missavSource,title:String(video.title || '').slice(0,300),thumbnail:video.thumbnail,thumbnails:video.thumbnails,site:sourcePost?'x':'missav'} : {})});
         }catch{}
       }
       entry.frames.set(sender.frameId || 0,videos);

@@ -12,13 +12,13 @@ function playlistVariants(text, baseUrl) {
   return variants;
 }
 const height = definition => mediaHeight(definition.quality);
-export function chooseDefinition(definitions, preference) {
-  const sorted = definitions.filter(def => def.videoUrl).sort((a,b) => height(b)-height(a));
+export function chooseDefinition(definitions, preference,{preferMp4=false}={}) {
+  const sorted = definitions.filter(def => def.videoUrl).sort((a,b) => height(b)-height(a) || (preferMp4?Number(b.format==='mp4')-Number(a.format==='mp4'):0));
   if (preference === 'mp4') return sorted.find(def => def.format === 'mp4');
   const wanted = mediaHeight(preference);
   return wanted ? sorted.find(def => height(def) === wanted) || sorted.find(def => height(def) < wanted) || sorted[0] : sorted[0];
 }
-export async function resolveMedia(html,pageUrl,preference,fetchText,{format:requiredFormat,strictQuality=false} = {}) {
+export async function resolveMedia(html,pageUrl,preference,fetchText,{format:requiredFormat,strictQuality=false,preferMp4=false} = {}) {
   const media = extractMedia(html), definitions = [];
   const site = await siteDefinitions(html,pageUrl,fetchText);
   for (const definition of [...site,...media.definitions]) {
@@ -44,12 +44,12 @@ export async function resolveMedia(html,pageUrl,preference,fetchText,{format:req
   }
   const wanted=mediaHeight(preference);
   const candidates = strictQuality && wanted > 0 ? expanded.filter(def => height(def) === wanted) : expanded;
-  const chosen = chooseDefinition(candidates,preference);
+  const chosen = chooseDefinition(candidates,preference,{preferMp4});
   if (!chosen && requiredFormat) throw Error('The original video quality/format is unavailable. Cached data was kept; retry when it is available.');
   if (!chosen) throw Error(preference === 'mp4' ? 'No MP4 stream is available for this video' : 'No supported video stream found');
   const videoUrl = new URL(decode(chosen.videoUrl),pageUrl).href;
   const quality = height(chosen);
-  return {title:media.title,url:videoUrl,format:chosen.format,quality:String(quality || 'Auto'),...(chosen.headers ? {headers:chosen.headers} : {})};
+  return {title:chosen.title || media.title,url:videoUrl,format:chosen.format,quality:String(quality || 'Auto'),...(chosen.headers ? {headers:chosen.headers} : {})};
 }
 
 export function safeFilePart(value) {

@@ -1,13 +1,15 @@
 import {parsePlaylist, chooseVariant, compatiblePlaylists, encryptionIV} from './hls-playlist.js';
 import {needsSourceRefresh,httpError} from './source-refresh.js';
 import {exactRequestCondition} from './media-headers.js';
+import {fetchBytes} from './network.js';
+import {remuxToMp4} from './mp4-output.js';
 
 const checkpointName = base => `${base}.hls.json`;
 export async function removeHlsCache(base, storage = navigator.storage) {
   if (!base) return;
   const root = await storage.getDirectory();
   for await (const [name] of root.entries()) {
-    if (name === base || name === checkpointName(base) || name.startsWith(`${base}.hls-`)) await root.removeEntry(name);
+    if (name === base || name === base+'.converted.mp4' || name === checkpointName(base) || name.startsWith(`${base}.hls-`)) await root.removeEntry(name);
   }
 }
 
@@ -19,7 +21,7 @@ export class HlsDownloader {
   bytesReceived = 0;
   completed = new Set();
   activeRuleIds = new Set();
-  constructor({saveFile,fetcher = fetch,storage = navigator.storage,cryptoApi = globalThis.crypto,maxConcurrent = 4,timeout = 20000,retryInterval = 500,resolveSource,...callbacks} = {}) {
+  constructor({saveFile,fetcher = fetch,storage = navigator.storage,cryptoApi = globalThis.crypto,maxConcurrent = 4,timeout = 60000,retryInterval = 500,resourceRetries=2,headerBridge,transmuxerFactory,resolveSource,...callbacks} = {}) {
     this.saveFile = saveFile;
     this.fetcher = (url, options) => fetcher.call(globalThis,url,options);
     this.storage = storage;
@@ -27,6 +29,9 @@ export class HlsDownloader {
     this.maxConcurrent = Math.max(1,Math.min(6,maxConcurrent));
     this.timeout = timeout;
     this.retryInterval = retryInterval;
+    this.resourceRetries=resourceRetries;
+    this.headerBridge=headerBridge;
+    this.transmuxerFactory=transmuxerFactory;
     this.resolveSource = resolveSource;
     this.callbacks = callbacks;
   }
@@ -65,14 +70,14 @@ export class HlsDownloader {
       if (headers.has(name)) { requestHeaders.push({operation:'set',header:name,value:headers.get(name)}); headers.delete(name); }
     }
     if (range) headers.set('Range',`bytes=${range.start}-${range.start+range.length-1}`);
-    const ruleId = requestHeaders.length ? Math.ceil(Math.random()*100000000) : 0;
+    let ruleId = requestHeaders.length ? Math.ceil(Math.random()*100000000) : 0;
     try {
       if (ruleId) {
-        await chrome.declarativeNetRequest.updateSessionRules({addRules:[{id:ruleId,priority:1,action:{type:'modifyHeaders',requestHeaders},condition:exactRequestCondition(url)}]});
+        if(this.headerBridge)ruleId=await this.headerBridge.add(url,this.options.headers || {});
+        else await chrome.declarativeNetRequest.updateSessionRules({addRules:[{id:ruleId,priority:1,action:{type:'modifyHeaders',requestHeaders},condition:exactRequestCondition(url)}]});
         this.activeRuleIds.add(ruleId);
       }
-      const response = await this.fetcher(url,{headers,credentials:'include',cache:'no-store',signal:AbortSignal.any([this.controller.signal,AbortSignal.timeout(this.timeout)])});
-      if (!response.ok) { await response.body?.cancel(); throw httpError(response.status,'HLS resource'); }
+      const response = await fetchBytes(url,{headers,fetcher:this.fetcher,signal:this.controller.signal,timeout:this.timeout});
       if (range) {
         const match = response.headers.get('Content-Range')?.match(/^bytes\s+(\d+)-(\d+)\//i);
         if (response.status !== 206 || !match || Number(match[1]) !== range.start || Number(match[2]) !== range.start+range.length-1) {
@@ -80,13 +85,14 @@ export class HlsDownloader {
         }
       }
       // Consume the body while timeout and header rules still apply.
-      const data = new Uint8Array(await response.arrayBuffer());
+      const data = response.data;
       this.check();
       if (range && data.length !== range.length) throw Error('Incomplete HLS byte-range segment');
       return {data,url:response.url || url};
     } finally {
       if (ruleId) {
-        await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds:[ruleId]}).catch(() => {});
+        if(this.headerBridge)await this.headerBridge.remove(ruleId).catch(()=>{});
+        else await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds:[ruleId]}).catch(() => {});
         this.activeRuleIds.delete(ruleId);
       }
     }
@@ -196,7 +202,8 @@ export class HlsDownloader {
     return this.keyPromises.get(key.cacheName);
   }
   async downloadUnit(index) {
-    for (let attempt=0;attempt<3;attempt++) {
+    let renewed=false;
+    for (let attempt=0;attempt<=this.resourceRetries;attempt++) {
       this.check();
       const generation = this.urlGeneration;
       try {
@@ -221,14 +228,36 @@ export class HlsDownloader {
         this.report();
         return;
       } catch (error) {
-        if (this.stopped() || attempt === 2) throw error;
-        if (needsSourceRefresh(error)) await this.refreshUrls(generation);
-        else await new Promise(resolve => { const timer=setTimeout(done,this.retryInterval); const signal=this.controller.signal; function done(){clearTimeout(timer);signal.removeEventListener('abort',done);resolve();} signal.addEventListener('abort',done,{once:true}); });
+        if (this.stopped()) throw error;
+        // Link renewal has its own single attempt; transient retries are owned
+        // by the queue and may be disabled here without disabling renewal.
+        if(needsSourceRefresh(error)){
+          if(renewed)throw Object.assign(Error('The media link was rejected after refresh. Cached segments were kept; open the original video page and retry.'),{status:error.status,code:'HTTP'});
+          renewed=true;await this.refreshUrls(generation);attempt--;continue;
+        }
+        if(attempt===this.resourceRetries)throw error;
+        await new Promise(resolve => { const timer=setTimeout(done,this.retryInterval); const signal=this.controller.signal; function done(){clearTimeout(timer);signal.removeEventListener('abort',done);resolve();} signal.addEventListener('abort',done,{once:true}); });
       }
     }
   }
   async assemble() {
     const output = this.options.opfsFileName;
+    if(this.options.outputFormat==='mp4' && this.manifest.outputExtension==='ts' && this.transmuxerFactory){
+      const converted=output+'.converted.mp4';
+      if(this.manifest.convertedBytes && this.manifest.converterVersion===1){
+        try {if((await this.readFile(converted)).size===this.manifest.convertedBytes){this.outputFile=converted;return;}}catch{}
+      }
+      this.report({phase:'converting',progress:90});
+      try {
+        const size=await remuxToMp4({root:this.root,units:this.manifest.units,output:converted,transmuxerFactory:this.transmuxerFactory,check:()=>this.check(),onProgress:fraction=>this.report({phase:'converting',progress:90+fraction*3})});
+        this.check();this.outputFile=converted;this.manifest.convertedBytes=size;this.manifest.converterVersion=1;await this.saveManifest();return;
+      }catch(error){
+        this.check();
+        if(error.code!=='CONVERSION_UNSUPPORTED')throw error;
+        this.fallbackReason='MP4 conversion is unavailable for this stream; saving the original TS format.';
+        this.report({fallbackReason:this.fallbackReason});
+      }
+    }
     if (this.manifest.outputBytes > 0) {
       try { if ((await this.readFile(output)).size === this.manifest.outputBytes) return; }
       catch (error) { if (error.name !== 'NotFoundError') throw error; }
@@ -274,13 +303,17 @@ export class HlsDownloader {
       this.check();
       await this.assemble();
       this.check();
-      const outputExtension = this.manifest.outputExtension;
-      this.report({isFileDownloading:true,progress:92});
-      await this.saveFile({opfsFileName:this.options.opfsFileName,fileName:this.options.fileName,format:outputExtension === 'mp4' ? 'mp4' : 'm3u8',
-        downloadSubdir:this.options.downloadSubdir,bytesReceived:this.bytesReceived,onProgress:data => this.report(data)});
+      const outputExtension = this.outputFile ? 'mp4' : this.manifest.outputExtension;
+      const outputBytes=this.outputFile?this.manifest.convertedBytes:this.manifest.outputBytes;
+      this.report({isFileDownloading:true,progress:94,phase:'saving',outputExtension,outputBytes,outputCacheFileName:this.outputFile || this.options.opfsFileName,fallbackReason:this.fallbackReason});
+      await this.saveFile({opfsFileName:this.outputFile || this.options.opfsFileName,fileName:this.options.fileName,format:outputExtension === 'mp4' ? 'mp4' : 'm3u8',
+        downloadSubdir:this.options.downloadSubdir,bytesReceived:outputBytes,onProgress:data => this.report(data)});
       if (!this.destroyed) this.callbacks.onComplete?.({fileName:this.options.fileName});
     } catch (error) {
-      if (!this.pauseRequested && !this.destroyed) this.callbacks.onError?.(`${error.message || String(error)}${needsSourceRefresh(error) ? '. Cached segments were kept; open the original video page and retry.' : ''}`);
+      if (!this.pauseRequested && !this.destroyed) {
+        if(this.callbacks.onFailure)this.callbacks.onFailure(error);
+        else this.callbacks.onError?.(`${error.message || String(error)}${needsSourceRefresh(error) ? '. Cached segments were kept; open the original video page and retry.' : ''}`);
+      }
     }
   }
   async pauseSoft() {

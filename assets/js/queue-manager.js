@@ -7,9 +7,18 @@ import {profileKey,downloadedRecord,videoKey} from './video-details.js';
 import {changeSelection,selectionView} from './profile-selection.js';
 import {mediaHeaders,exactRequestCondition} from './media-headers.js';
 import {createMediaDiscovery} from './media-discovery.js';
+import {isXPage} from './x-media.js';
+import {isMissavPage} from './missav-media.js';
+import {OffscreenDownload} from './offscreen-client.js';
+import {fetchBytes,networkError,transientError,retryDelay,errorData,restoreError} from './network.js';
+import {installWindowManager} from './window-manager.js';
 
 export function installQueueManager({queueStorage, historyStorage, settingsStorage, HlsDownloader = PersistentHlsDownloader, registerBlob, bindBlob, clearBlob, formatFilename, withSubdir}) {
   const active = new Map(), operations = new Map(), meter = new SpeedMeter();
+  const useOffscreen=HlsDownloader===PersistentHlsDownloader && !!chrome.offscreen?.createDocument;
+  const windowManager=installWindowManager();
+  const headerRuleIds=new Set();
+  let retryTimer,schedulingPromise;
   const discovery=createMediaDiscovery();
   chrome.tabs?.onRemoved?.addListener(tabId=>discovery.remove(tabId));
   let scheduling = false, reschedule = false, initialized = false, offscreenPromise, scanController, batchRunning = false;
@@ -20,6 +29,19 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
   const taskById = async id => (await queueStorage.get()).tasks.find(t => t.id === id);
   const patch = (id, value) => queueStorage.updateTask(id, value);
   const notify = message => chrome.runtime.sendMessage(message).catch(() => {});
+  const remoteInstance=(task,entry)=>new OffscreenDownload({task:{...task,downloadSubdir:entry.subdir},ensureOffscreen,
+    saveFile:options=>saveFile({...options,entry}),...callbacks(task,entry),
+    onFailure:error=>failed(entry.task,entry,error).catch(console.error),
+    onSourceRefreshed:async source=>{Object.assign(entry.task,source);entry.kind=source.format==='m3u8'?'m3u8':'mp4';await patch(task.id,source);}});
+  async function addHeaders(url,headers={}){
+    const parsed=new URL(url);if(!/^https?:$/.test(parsed.protocol))throw Error('Invalid request URL');
+    const requestHeaders=Object.entries(headers || {}).filter(([key,value])=>/^(Origin|Referer|Cookie)$/i.test(key) && typeof value==='string' && value && !/[\r\n]/.test(value)).map(([header,value])=>({operation:'set',header,value}));
+    if(!requestHeaders.length)return 0;
+    let id;do{id=600000000+Math.floor(Math.random()*400000000);}while(headerRuleIds.has(id));
+    await chrome.declarativeNetRequest.updateSessionRules({addRules:[{id,priority:1,action:{type:'modifyHeaders',requestHeaders},condition:exactRequestCondition(parsed.href)}]});
+    headerRuleIds.add(id);return id;
+  }
+  async function releaseHeaders(id){if(!headerRuleIds.has(id))return;await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds:[id]});headerRuleIds.delete(id);}
   const serial = (id, fn) => {
     const next = (operations.get(id) || Promise.resolve()).then(fn);
     const settled = next.catch(() => {});
@@ -30,7 +52,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     if (!offscreenPromise) offscreenPromise = (async () => {
       if (await chrome.offscreen.hasDocument?.()) return;
       try {
-        await chrome.offscreen.createDocument({url:'src/pages/offscreen/index.html',reasons:['BLOBS','DOM_PARSER'],justification:'Save cached video files and parse creator video listings'});
+        await chrome.offscreen.createDocument({url:'src/pages/offscreen/index.html',reasons:['BLOBS','DOM_PARSER','WORKERS'],justification:'Run persistent video transfer/conversion workers, save cached files and parse creator listings'});
       } catch (error) { if (!/already exists|single offscreen/i.test(error.message)) throw error; }
     })().finally(() => { offscreenPromise = null; });
     return offscreenPromise;
@@ -39,6 +61,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     if (name) try { await (await navigator.storage.getDirectory()).removeEntry(name); } catch {}
   }
   async function removeTaskCache(task) {
+    if(task?.outputCacheFileName && task.outputCacheFileName!==task.opfsCacheFileName)await removeCache(task.outputCacheFileName);
     if (task?.format === 'm3u8') {
       try { await removeHlsCache(task.opfsCacheFileName); } catch {}
     } else await removeCache(task?.opfsCacheFileName);
@@ -49,6 +72,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     const result = await chrome.runtime.sendMessage({type:'OPFS_TO_BLOB_URL',filename:opfsFileName,mimeType:format === 'webm' ? 'video/webm' : format === 'm3u8' ? 'video/MP2T' : 'video/mp4'});
     if (!result?.ok || !result.blobUrl) throw Error(result?.error || 'Could not open the cached video');
     const blobUrl = result.blobUrl;
+    if(entry)entry.phase='saving';
     const name = withSubdir(formatFilename(fileName || 'video', format === 'm3u8' ? 'ts' : format || 'mp4'), downloadSubdir);
     let downloadId, done = false;
     try {
@@ -87,8 +111,8 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
   }
   const recordCompletion = (task,entry) => historyStorage.addRecord(entry?.savedFileName || task.savedFileName || task.fileName || 'video',task.url,task.pageUrl,{
     taskId:task.id,title:task.title || task.fileName,creator:task.creator,quality:task.quality,
-    format:task.outputExtension || task.format,thumbnail:task.thumbnail,thumbnails:task.thumbnails,
-    bytes:entry?.instance?.getBytesReceived?.() || task.fetchedBytes || task.cachedBytes,
+    format:entry?.task?.outputExtension || task.outputExtension || task.format,thumbnail:task.thumbnail,thumbnails:task.thumbnails,
+    bytes:entry?.task?.outputBytes || task.outputBytes || entry?.instance?.getBytesReceived?.() || task.fetchedBytes || task.cachedBytes,
     downloadId:entry?.saveId ?? task.chromeDownloadId
   });
   async function completed(task, entry) {
@@ -100,26 +124,34 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     await recordCompletion(task,entry);
     await queueStorage.removeTask(task.id);
     await entry.instance?.destroy?.(true);
+    if(useOffscreen && !(entry.instance instanceof OffscreenDownload))await notify({type:'mf-offscreen-command',command:'drop',taskId:task.id});
     await removeTaskCache(task);
     notify({type:'download-task-complete',taskId:task.id,fileName:task.fileName});
     schedule();
   }
   async function failed(task, entry, error) {
-    if (active.get(task.id) !== entry || entry.deleted || entry.finished) return;
+    if (active.get(task.id) !== entry || entry.deleted || entry.finished || entry.paused) return;
     entry.finished = true;
     active.delete(task.id);
     clearTimeout(entry.progressTimer);
     meter.clear(task.id);
-    await patch(task.id,{status:'error',error:String(error),downloadSpeed:0,speedFormatted:'',isFileDownloading:false,chromeDownloadId:undefined,cachedBytes:entry.instance?.getBytesReceived?.() || task.cachedBytes});
+    error=networkError(error);
+    const current=await taskById(task.id),retryCount=Number(current?.retryCount)||0;
+    const retry=transientError(error) && retryCount<3;
+    await patch(task.id,{outputReady:entry.task.outputReady,outputCacheFileName:entry.task.outputCacheFileName,outputExtension:entry.task.outputExtension,outputBytes:entry.task.outputBytes,fallbackReason:entry.task.fallbackReason,
+      status:retry?'queued':'error',phase:retry?'waiting':'error',error:error.message,errorCode:error.code || error.name,retryCount:retry?retryCount+1:retryCount,
+      nextRetryAt:retry?Date.now()+retryDelay(retryCount+1,error.retryAfter):undefined,downloadSpeed:0,speedFormatted:'',isFileDownloading:false,chromeDownloadId:undefined,cachedBytes:entry.instance?.getBytesReceived?.() || task.cachedBytes});
     await entry.instance?.destroy?.(false);
-    notify({type:'download-task-error',taskId:task.id,error:String(error)});
+    if(useOffscreen && !(entry.instance instanceof OffscreenDownload))await notify({type:'mf-offscreen-command',command:'drop',taskId:task.id});
+    if(!retry)notify({type:'download-task-error',taskId:task.id,error:error.message});
     schedule();
   }
   function progress(task, entry, data) {
     if (active.get(task.id) !== entry || entry.deleted || entry.finished) return;
-    const bytes = Number(data.bytesReceived) || 0;
+    const bytes = data.bytesReceived==null ? Number(entry.task.cachedBytes || task.cachedBytes)||0 : Number(data.bytesReceived)||0;
     if (!entry.progressSeeded) { meter.clear(task.id); meter.update(task.id,bytes); entry.progressSeeded = true; }
     if (data.isFileDownloading) entry.phase = 'saving';
+    else if(data.phase)entry.phase=data.phase;
     if (typeof data.chromeDownloadId === 'number') {
       entry.saveId = data.chromeDownloadId;
       if (entry.paused) chrome.downloads.pause(entry.saveId).catch(error => failed(task,entry,error.message));
@@ -130,6 +162,13 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     if (typeof data.chromeDownloadId === 'number') value.chromeDownloadId = data.chromeDownloadId;
     if (data.totalBytes > 0) value.totalBytes = data.totalBytes;
     if (data.outputExtension) value.outputExtension = data.outputExtension;
+    if(data.outputBytes>0)value.outputBytes=data.outputBytes;
+    if(data.phase)value.phase=data.phase;
+    if(data.fallbackReason)value.fallbackReason=data.fallbackReason;
+    if(data.outputCacheFileName){value.outputCacheFileName=data.outputCacheFileName;value.outputReady=!!data.isFileDownloading || data.phase==='saving';}
+    const critical=typeof data.chromeDownloadId==='number' || data.outputCacheFileName && value.outputReady || data.phase && data.phase!==entry.task.phase;
+    Object.assign(entry.task,value);
+    if(critical){entry.latestProgress=null;clearTimeout(entry.progressTimer);entry.progressTimer=null;return patch(task.id,value);}
     if (data.savedFileName) { entry.savedFileName=data.savedFileName;value.savedFileName=data.savedFileName; }
     // Serialize/coalesce disk writes; rapid network chunks must not flood storage.
     entry.latestProgress = {...entry.latestProgress,...value};
@@ -154,7 +193,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       return;
     }
     const kind = fresh.format === 'm3u8' || /\.m3u8(?:[?#]|$)/i.test(fresh.url) ? 'm3u8' : 'mp4';
-    const entry = {kind,phase:'starting',paused:false,task:fresh};
+    const entry = {kind,phase:'starting',paused:false,task:fresh,controller:new AbortController()};
     active.set(task.id,entry);
     try {
       const settings = await settingsStorage.get();
@@ -162,13 +201,28 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       entry.subdir = settings.downloadSubdir || '';
       const cb = callbacks(fresh,entry);
       const saveForTask = options => saveFile({...options,entry});
+      if(fresh.outputReady && fresh.outputCacheFileName){await exportCachedSave(fresh,entry);return;}
+      if(useOffscreen){
+        entry.instance=remoteInstance(fresh,entry);
+        await patch(task.id,{status:'downloading',phase:fresh.url?'downloading':'resolving',startedAt:fresh.startedAt || Date.now(),nextRetryAt:undefined,error:undefined,downloadSpeed:0,isFileDownloading:false});
+        if(entry.deleted || entry.paused)return;
+        await entry.instance.start();return;
+      }
+      if(!fresh.url){
+        const fetchForTask=(url,headers)=>fetchText(url,headers,entry.controller.signal);
+        const media=await resolveMedia(await fetchForTask(fresh.pageUrl,{Referer:fresh.pageUrl}),fresh.pageUrl,fresh.quality,fetchForTask,{preferMp4:fresh.outputFormat==='mp4'});
+        entry.controller.signal.throwIfAborted();
+        if(downloadedRecord((await historyStorage.get()).records || [],fresh.pageUrl,media.url)){active.delete(task.id);await queueStorage.removeTask(task.id);schedule();return;}
+        Object.assign(fresh,media);entry.kind=media.format==='m3u8'?'m3u8':'mp4';await patch(fresh.id,media);
+      }
       const resolveSource = fresh.pageUrl ? async signal => {
         const fetchFresh = (url,headers) => fetchText(url,headers,signal);
-        const media = await resolveMedia(await fetchFresh(fresh.pageUrl,{Referer:fresh.pageUrl}),fresh.pageUrl,fresh.quality,fetchFresh,
+        const html=isXPage(fresh.pageUrl)?'':await fetchFresh(fresh.pageUrl,{Referer:fresh.pageUrl});
+        const media = await resolveMedia(html,fresh.pageUrl,fresh.quality,fetchFresh,
           {format:kind === 'm3u8' ? 'm3u8' : fresh.format || 'mp4',strictQuality:true});
         return {...media,headers:mediaHeaders(media.headers || fresh.headers,fresh.pageUrl)};
       } : undefined;
-      entry.instance = kind === 'm3u8' ? new HlsDownloader({maxConcurrent:4,retryInterval:1000,timeout:20000,saveFile:saveForTask,
+      entry.instance = entry.kind === 'm3u8' ? new HlsDownloader({maxConcurrent:4,retryInterval:1000,timeout:60000,saveFile:saveForTask,
         resolveSource,...cb}) : new DirectDownloader({saveFile:saveForTask,resolveSource,onSourceRefreshed:async source => {
           if (entry.deleted) return;
           const update = {url:source.url,headers:source.headers};
@@ -179,30 +233,43 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       if(entry.deleted || cancelledBatches.has(fresh.batchId))return;
       entry.phase = 'fetching';
       meter.update(task.id,kind === 'mp4' ? fresh.cachedBytes || 0 : 0);
-      const running = kind === 'm3u8'
-        ? entry.instance.start(fresh.url,{isGetMP4:false,fileName:fresh.fileName || 'video',headers:fresh.headers,quality:fresh.quality,opfsFileName:fresh.opfsCacheFileName,downloadSubdir:entry.subdir})
+      const running = entry.kind === 'm3u8'
+        ? entry.instance.start(fresh.url,{outputFormat:fresh.outputFormat || 'source',fileName:fresh.fileName || 'video',headers:fresh.headers,quality:fresh.quality,opfsFileName:fresh.opfsCacheFileName,downloadSubdir:entry.subdir})
         : entry.instance.start({...fresh,...cb,resumeFromByte:fresh.cachedBytes || 0,opfsFileName:fresh.opfsCacheFileName,downloadSubdir:entry.subdir});
       Promise.resolve(running).catch(error => failed(fresh,entry,error.message));
-    } catch (error) { await failed(fresh,entry,error.message); }
+    } catch (error) { await failed(fresh,entry,error); }
   }
-  async function schedule() {
+  function schedule(){
+    reschedule=true;
+    if(!initialized)return Promise.resolve();
+    if(schedulingPromise)return schedulingPromise;
+    schedulingPromise=drainQueue().finally(()=>{schedulingPromise=null;if(reschedule)schedule();});
+    return schedulingPromise;
+  }
+  async function drainQueue() {
     reschedule = true;
     if (scheduling || !initialized) return;
     scheduling = true;
     try {
       while (reschedule) {
         reschedule = false;
-        const limit = Math.max(1,Math.min(20,Number((await settingsStorage.get()).maxConcurrentTasks) || 6));
+        const limit = Math.max(1,Math.min(20,Math.floor(Number((await settingsStorage.get()).maxConcurrentTasks) || 6)));
         const tasks = (await queueStorage.get()).tasks;
         for (const task of tasks.filter(t => t.status === 'queued').sort((a,b) => a.createdAt-b.createdAt)) {
           if (cancelledBatches.has(task.batchId)) continue;
+          if(task.nextRetryAt>Date.now())continue;
           const recovered = tasks.filter(t => t.status === 'downloading' && !active.has(t.id)).length;
           if (recovered + [...active.values()].filter(e => !e.paused && !e.finished).length >= limit) break;
-          await serial(task.id,() => active.get(task.id)?.paused ? resume(task.id) : start(task));
+          await serial(task.id,() => active.get(task.id)?.paused || typeof task.chromeDownloadId==='number' ? resumeNow(task.id) : start(task));
         }
       }
     } catch (error) { console.error('[queue] schedule',error); }
-    finally { scheduling = false; }
+    finally {
+      scheduling = false;clearTimeout(retryTimer);
+      const waiting=(await queueStorage.get()).tasks.filter(task=>task.status==='queued' && task.nextRetryAt>Date.now());
+      if(waiting.length){const when=Math.min(...waiting.map(task=>task.nextRetryAt));retryTimer=setTimeout(()=>schedule(),Math.max(1,when-Date.now()));retryTimer.unref?.();chrome.alarms?.create('mediaflow-queue-retry',{when});}
+      else chrome.alarms?.clear('mediaflow-queue-retry');
+    }
   }
   async function pause(id) {
     const task = await taskById(id);
@@ -219,7 +286,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
           try { await chrome.downloads.pause(saveId); }
           catch (error) { entry.paused = false; throw error; }
         }
-      } else await entry.instance.pauseSoft();
+      } else {entry.controller?.abort();await entry.instance?.pauseSoft();}
       entry.latestProgress = null;
     } else if (typeof task.chromeDownloadId === 'number') await chrome.downloads.pause(task.chromeDownloadId);
     if (await taskById(id)) await patch(id,{status:'paused',cachedBytes:entry?.instance?.getBytesReceived?.() ?? task.cachedBytes,downloadSpeed:0,speedFormatted:''});
@@ -238,24 +305,31 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     await previous?.instance?.destroy?.(false);
     await patch(task.id,{status:'downloading',isFileDownloading:true,chromeDownloadId:undefined,error:undefined,downloadSpeed:0,speedFormatted:''});
     const settings = await settingsStorage.get();
-    saveFile({opfsFileName:task.opfsCacheFileName,fileName:task.fileName,format:task.outputExtension === 'mp4' ? 'mp4' : task.format,downloadSubdir:settings.downloadSubdir || '',entry,
+    saveFile({opfsFileName:task.outputCacheFileName || task.opfsCacheFileName,fileName:task.fileName,format:task.outputExtension === 'mp4' ? 'mp4' : task.format,downloadSubdir:settings.downloadSubdir || '',entry,
       bytesReceived:entry.instance.getBytesReceived(),onProgress:data => progress(task,entry,data)})
       .then(() => completed(task,entry),error => failed(task,entry,error.message)).catch(console.error);
   }
   async function resume(id) {
+    const task=await taskById(id);if(!task)throw Error('Task not found');
+    if(task.status==='downloading')return;
+    await patch(id,{status:'queued',error:undefined,retryCount:0,nextRetryAt:undefined});
+    schedule();
+  }
+  async function resumeNow(id) {
     const task = await taskById(id);
     if (!task) throw Error('Task not found');
-    const entry = active.get(id);
-    if (task.status === 'downloading' || (task.status === 'queued' && !entry?.paused)) return;
-    const limit = Number((await settingsStorage.get()).maxConcurrentTasks) || 6;
+    let entry = active.get(id);
+    if (task.status !== 'queued') return;
+    const limit = Math.max(1,Math.min(20,Math.floor(Number((await settingsStorage.get()).maxConcurrentTasks) || 6)));
     const occupied = [...active.values()].filter(e => !e.paused && !e.finished).length + (await queueStorage.get()).tasks.filter(t => t.status === 'downloading' && !active.has(t.id)).length;
-    if (occupied >= limit && entry?.phase !== 'saving' && typeof task.chromeDownloadId !== 'number') {
+    if (occupied >= limit) {
       // Leave cached paused engines intact; scheduler resumes these when a slot opens.
       await patch(id,{status:'queued',error:undefined});
       schedule();
       return;
     }
     if (entry?.phase === 'saving' || typeof task.chromeDownloadId === 'number') {
+      if(!entry){entry={kind:task.format==='m3u8'?'m3u8':'mp4',phase:'saving',task,paused:true,recoveredSave:true,instance:{getBytesReceived:()=>task.cachedBytes || 0}};active.set(id,entry);}
       const saveId = entry?.saveId ?? task.chromeDownloadId;
       if (entry) entry.paused = false;
       try { if (typeof saveId === 'number') await chrome.downloads.resume(saveId); }
@@ -267,13 +341,14 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       await patch(id,{status:'downloading',error:undefined});
       return;
     }
+    if(entry && !entry.instance){active.delete(id);await start(task);return;}
     if (entry) {
       entry.paused = false;
       entry.finished = false;
       entry.progressSeeded = false;
       meter.clear(id);
       await patch(id,{status:'downloading',error:undefined,downloadSpeed:0,speedFormatted:'0 B/s'});
-      if (entry.kind === 'm3u8' && (entry.instance.persistent || entry.instance.tsUrlList?.length)) Promise.resolve(entry.instance.resume()).catch(error => failed(task,entry,error.message));
+      if (entry.instance instanceof OffscreenDownload || entry.kind === 'm3u8' && (entry.instance.persistent || entry.instance.tsUrlList?.length)) Promise.resolve(entry.instance.resume()).catch(error => failed(task,entry,error));
       else if (entry.kind === 'mp4') {
         entry.instance.start({...task,...callbacks(task,entry),resumeFromByte:entry.instance.getBytesReceived(),opfsFileName:task.opfsCacheFileName,downloadSubdir:entry.subdir}).catch(error => failed(task,entry,error.message));
       } else {
@@ -290,7 +365,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
   async function remove(id) {
     const task = await taskById(id);
     const entry = active.get(id);
-    if (entry) { entry.deleted = true; entry.finished = true; clearTimeout(entry.progressTimer); active.delete(id); }
+    if (entry) { entry.deleted = true; entry.finished = true;entry.controller?.abort();clearTimeout(entry.progressTimer); active.delete(id); }
     const saveId = entry?.saveId ?? task?.chromeDownloadId;
     if (typeof saveId === 'number') await chrome.downloads.cancel(saveId).catch(() => {});
     await entry?.instance?.destroy?.(true);
@@ -302,6 +377,12 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
   async function fetchResource(url, headers = {}, image = false, signal) {
     const parsed = new URL(url);
     if (!/^https?:$/.test(parsed.protocol)) throw Error('Invalid URL');
+    if(useOffscreen){
+      await ensureOffscreen();const id=crypto.randomUUID();
+      const abort=()=>notify({type:'mf-fetch-cancel',id});signal?.throwIfAborted();signal?.addEventListener('abort',abort,{once:true});
+      try{const result=await chrome.runtime.sendMessage({type:'mf-fetch-resource',id,url:parsed.href,headers,image});signal?.throwIfAborted();if(!result?.ok)throw restoreError(result?.error || {message:'The request failed'});return image?result.dataUrl:result.text;}
+      finally{signal?.removeEventListener('abort',abort);}
+    }
     const requestHeaders = new Headers(headers), rules = [];
     for (const key of ['Origin','Referer','Cookie']) {
       if (requestHeaders.has(key)) { rules.push({operation:'set',header:key,value:requestHeaders.get(key)}); requestHeaders.delete(key); }
@@ -309,13 +390,11 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     const ruleId = Math.ceil(Math.random()*100000000);
     try {
       if (rules.length) await chrome.declarativeNetRequest.updateSessionRules({addRules:[{id:ruleId,priority:1,action:{type:'modifyHeaders',requestHeaders:rules},condition:exactRequestCondition(parsed.href)}]});
-      const timeout = AbortSignal.timeout(20000);
-      const response = await fetch(parsed.href,{headers:requestHeaders,credentials:'include',cache:'no-store',signal:signal ? AbortSignal.any([signal,timeout]) : timeout});
-      if (!response.ok) throw Error(`HTTP ${response.status}: unable to fetch page`);
-      if (!image) return await response.text();
+      const response = await fetchBytes(parsed.href,{headers:requestHeaders,signal,maxBytes:image?5*1024*1024:16*1024*1024});
+      if (!image) return new TextDecoder().decode(response.data);
       const mime = (response.headers.get('Content-Type') || '').split(';')[0];
       if (!/^image\/(jpeg|png|webp|gif|avif)$/i.test(mime)) throw Error('The thumbnail URL did not return an image');
-      const bytes = new Uint8Array(await response.arrayBuffer());
+      const bytes = response.data;
       if (bytes.length > 5*1024*1024) throw Error('Thumbnail is too large');
       let binary = '';
       for (let i=0;i<bytes.length;i+=8192) binary += String.fromCharCode(...bytes.subarray(i,i+8192));
@@ -328,8 +407,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     const fetchForBatch=(url,headers) => fetchText(url,headers,signal);
     let batch = {id:job.id,profileKey:job.profileKey,profileName:message.profileName,status:'running',total:message.videos.length,processed:0,enqueued:0,skipped:0,failed:0,errors:[],currentTitle:''};
     try {
-      await ensureOffscreen();
-      await notify({type:'profile-scan-keepalive',enabled:true,job:'batch'});
+      const settings=await settingsStorage.get();
       for (const video of message.videos) {
         signal.throwIfAborted();
         batch.currentTitle = video.title;
@@ -338,17 +416,15 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
           if (downloadedRecord((await historyStorage.get()).records || [],video.url,video.videoUrl)) {
             batch.skipped++;batch.processed++;continue;
           }
-          const media = await resolveMedia(await fetchForBatch(video.url,{Referer:video.url}),video.url,message.quality,fetchForBatch);
-          signal.throwIfAborted();
-          // A different download may have completed while this page resolved.
-          if (downloadedRecord((await historyStorage.get()).records || [],video.url,media.url)) {
+          if((await queueStorage.get()).tasks.some(task=>videoKey(task.pageUrl)===videoKey(video.url))){
             batch.skipped++;batch.processed++;continue;
           }
           const creator = safeFilePart(message.profileName || 'Creator');
-          const title = safeFilePart(media.title || video.title);
-          await queueStorage.enqueue({...media,fileName:message.useChannelFolder ? `${creator}/${title}` : `${creator} - ${title}`,
-            title:media.title || video.title,creator:message.profileName,thumbnail:video.thumbnail,thumbnails:video.thumbnails,
-            batchId:job.id,batchProfileKey:job.profileKey,pageUrl:video.url,headers:mediaHeaders(media.headers,video.url)});
+          const title = safeFilePart(video.title);
+          const page=new URL(video.url);if(!/^https?:$/.test(page.protocol))throw Error('Invalid video page URL');
+          await queueStorage.enqueue({url:'',quality:message.quality,outputFormat:message.outputFormat || settings.outputFormat || 'mp4',fileName:message.useChannelFolder ? `${creator}/${title}` : `${creator} - ${title}`,
+            title:video.title,creator:message.profileName,thumbnail:video.thumbnail,thumbnails:video.thumbnails,
+            batchId:job.id,batchProfileKey:job.profileKey,pageUrl:page.href,headers:mediaHeaders({},page.href)});
           batch.enqueued++;
           schedule();
         } catch (error) {
@@ -378,7 +454,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     // Fence scheduling/completion before waiting for the resolving request to stop.
     for (const task of (await queueStorage.get()).tasks.filter(matches)) {
       cancelledBatches.add(task.batchId);
-      const entry=active.get(task.id); if(entry)entry.deleted=true;
+      const entry=active.get(task.id); if(entry){entry.deleted=true;entry.controller?.abort();}
     }
     if (saved && (saved.id===message.batchId || saved.profileKey===key)) await chrome.storage.local.set({profileBatchState:{...saved,status:'cancelling'}});
     await job?.promise;
@@ -474,13 +550,37 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     let operation;
     const id = message.taskId;
     switch (message.type) {
+      case 'mediaflow-source-tab': operation=windowManager.source(message.windowId);break;
+      case 'mf-run-event':
+        if(sender.tab || !sender.url?.startsWith(chrome.runtime.getURL('src/pages/offscreen/')))return false;
+        ready.then(()=>active.get(id)?.instance?.handle?.(message)).catch(console.error);respond({success:true});return false;
+      case 'mf-run-rpc':
+      case 'mf-header-add':
+      case 'mf-header-release':
+        if(sender.tab || !sender.url?.startsWith(chrome.runtime.getURL('src/pages/offscreen/')))return false;
+        operation=ready.then(async()=>{
+          if(message.type==='mf-header-add')return {result:await addHeaders(message.url,message.headers)};
+          if(message.type==='mf-header-release'){await releaseHeaders(message.id);return {};}
+          const entry=active.get(id);if(!entry || entry.instance?.runId!==message.runId || entry.deleted)throw Error('This download is no longer active');
+          if(message.method==='source'){
+            const source=message.params;
+            if(downloadedRecord((await historyStorage.get()).records || [],entry.task.pageUrl,source.url)){
+              serial(id,()=>remove(id)).catch(console.error);return {result:{skip:true}};
+            }
+            Object.assign(entry.task,source);entry.kind=source.format==='m3u8'?'m3u8':'mp4';await patch(id,source);return {result:{skip:false}};
+          }
+          if(message.method==='headers')return {result:await addHeaders(message.params.url,message.params.headers)};
+          if(message.method==='release-headers'){await releaseHeaders(message.params.id);return {};}
+          throw Error('Unknown worker operation');
+        });break;
       case 'media-detection-report':
         discovery.report(message,sender);
         if(sender.tab?.id!=null)notify({type:'media-detection-updated',tabId:sender.tab.id});
         respond({success:true});return false;
       case 'media-detection-snapshot': operation=(async()=>{
         const tab=chrome.tabs?.get ? await chrome.tabs.get(message.tabId) : null;
-        return {videoInfos:discovery.snapshot(message.tabId,tab?.url || message.pageUrl)};
+        const pageUrl=tab?.url || message.pageUrl;
+        return {videoInfos:discovery.snapshot(message.tabId,pageUrl),pageUrl,...(isXPage(pageUrl)?{site:'x'}:isMissavPage(pageUrl)?{site:'missav'}:{})};
       })();break;
       case 'download-queue-enqueue':
       case 'm3u8-download-start':
@@ -489,12 +589,13 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
           const url = new URL(message.url);
           if (!/^https?:$/.test(url.protocol)) throw Error('Invalid video URL');
           const format = message.format === 'hls' || message.format === 'm3u8' || /\.m3u8(?:[?#]|$)/i.test(url.href) ? 'm3u8' : message.format === 'webm' ? 'webm' : 'mp4';
-          const taskId = await queueStorage.enqueue({...message,url:url.href,format});
+          const settings=await settingsStorage.get();
+          const taskId = await queueStorage.enqueue({...message,url:url.href,format,outputFormat:message.outputFormat || settings.outputFormat || 'mp4'});
           schedule(); return {id:taskId};
         })(); break;
       case 'download-queue-pause': operation = serial(id,() => pause(id)); break;
-      case 'download-queue-resume': operation = serial(id,() => resume(id)); break;
-      case 'download-queue-retry': operation = serial(id,() => resume(id)); break;
+      case 'download-queue-resume': operation = serial(id,() => resume(id)).then(()=>schedulingPromise || schedule()); break;
+      case 'download-queue-retry': operation = serial(id,() => resume(id)).then(()=>schedulingPromise || schedule()); break;
       case 'download-queue-delete':
       case 'download-queue-cancel': operation = serial(id,() => remove(id)); break;
       case 'download-queue-clear-queued':
@@ -534,23 +635,48 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       case 'profile-batch-cancel': operation=cancelProfileBatch(message); break;
       default: return false;
     }
-    operation.then(result => respond({success:true,...result}),error => respond({success:false,error:error.message}));
+    operation.then(result => respond({success:true,...result}),error => respond({success:false,error:error.message,detail:errorData(error)}));
     return true;
   });
   // Restore saves after a worker restart, including paused browser downloads.
   chrome.downloads.onChanged.addListener(async delta => {
     for (const task of (await queueStorage.get()).tasks) {
-      if (task.chromeDownloadId !== delta.id || active.has(task.id)) continue;
+      if (task.chromeDownloadId !== delta.id || active.has(task.id) && !active.get(task.id).recoveredSave) continue;
+      const entry=active.get(task.id);
       if (delta.state?.current === 'complete') {
+        if(entry){await completed(task,entry);continue;}
         await recordCompletion(task);
+        if(useOffscreen)await notify({type:'mf-offscreen-command',command:'drop',taskId:task.id});
         await queueStorage.removeTask(task.id); await removeTaskCache(task); schedule();
-      } else if (delta.state?.current === 'interrupted') await patch(task.id,{status:'error',error:delta.error?.current || 'File save interrupted'});
+      } else if (delta.state?.current === 'interrupted') {
+        const recovered=entry || {kind:task.format==='m3u8'?'m3u8':'mp4',phase:'saving',paused:false,task,instance:{getBytesReceived:()=>task.cachedBytes || 0}};
+        if(!entry)active.set(task.id,recovered);
+        await failed(task,recovered,Error(delta.error?.current || 'File save interrupted'));
+      }
       else if (delta.paused) await patch(task.id,{status:delta.paused.current ? 'paused' : 'downloading'});
     }
   });
   settingsStorage.subscribe(() => schedule());
+  chrome.alarms?.onAlarm.addListener(alarm=>{if(alarm.name==='mediaflow-queue-retry')schedule();});
   const ready = (async () => {
+    let remoteRuns=[];
+    if(useOffscreen && await chrome.offscreen.hasDocument?.()){
+      const snapshot=await chrome.runtime.sendMessage({type:'mf-offscreen-command',command:'snapshot'});remoteRuns=snapshot?.runs || [];
+    }
+    const ownedRules=new Set(remoteRuns.flatMap(run=>run.ruleIds || []));
+    for(const id of ownedRules)headerRuleIds.add(id);
+    if(useOffscreen){const rules=await chrome.declarativeNetRequest.getSessionRules();const orphaned=rules.filter(rule=>rule.id>=600000000 && rule.id<1000000000 && !ownedRules.has(rule.id)).map(rule=>rule.id);if(orphaned.length)await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds:orphaned});}
     for (const task of (await queueStorage.get()).tasks) {
+      const run=remoteRuns.find(run=>run.taskId===task.id);
+      if(run && task.status!=='paused' && typeof task.chromeDownloadId!=='number'){
+        const restored={...task,...run.task};
+        const entry={kind:restored.format==='m3u8'?'m3u8':'mp4',phase:run.progress?.phase || 'downloading',task:restored,paused:false,subdir:restored.downloadSubdir || ''};
+        entry.instance=remoteInstance(restored,entry);entry.instance.runId=run.runId;entry.instance.bytes=run.bytes;active.set(task.id,entry);
+        await patch(task.id,{...run.task,...run.progress,status:'downloading'});
+        if(run.state==='ready')entry.instance.handle({runId:run.runId,event:'ready',output:run.output});
+        if(run.state==='error')await failed(restored,entry,restoreError(run.error));
+        continue;
+      }
       if (typeof task.chromeDownloadId === 'number') {
         const [item] = await chrome.downloads.search({id:task.chromeDownloadId});
         if (item?.state === 'complete') { await recordCompletion(task); await queueStorage.removeTask(task.id); await removeTaskCache(task); }
@@ -567,8 +693,9 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       await chrome.storage.local.set({profileBatchState:{...savedBatch,status:'cancelled'}});
     }
     if (savedBatch?.status === 'running' && !batchRunning) await chrome.storage.local.set({profileBatchState:{...savedBatch,status:'error',error:'Batch interrupted. Select remaining videos and start again.'}});
+    for(const run of remoteRuns)if(!await taskById(run.taskId))await notify({type:'mf-offscreen-command',command:'drop',taskId:run.taskId});
     initialized = true;
     await schedule();
   })().catch(console.error);
-  return {ready,active,pause:id => serial(id,() => pause(id)),resume:id => serial(id,() => resume(id)),remove:id => serial(id,() => remove(id)),schedule};
+  return {ready,active,pause:id => serial(id,() => pause(id)),resume:async id => {await serial(id,() => resume(id));await (schedulingPromise || schedule());},remove:id => serial(id,() => remove(id)),schedule};
 }

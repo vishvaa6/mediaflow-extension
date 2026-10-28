@@ -1,25 +1,42 @@
 import {parseProfileDocument,profileVideoElements} from './profile-scanner.js';
 import {profileKey,videoKey,downloadedRecord} from './video-details.js';
 import {selectionView,rangeHint} from './profile-selection.js';
+import {icon} from './icons.js';
 
 // Isolated-world UI: no page scripts run and no page global is trusted.
 export async function installProfilePageSelector() {
   if (window.top !== window || document.getElementById('mediaflow-profile-picker')) return;
+  if(window.__mediaflowProfilePickerInstalling)return;
+  window.__mediaflowProfilePickerInstalling=true;
   if (document.readyState === 'loading') await new Promise(resolve => document.addEventListener('DOMContentLoaded',resolve,{once:true}));
+  if(document.getElementById('mediaflow-profile-picker'))return;
   const host=document.createElement('div');host.id='mediaflow-profile-picker';host.hidden=true;
   const shadow=host.attachShadow({mode:'open'});
   shadow.innerHTML=`<style>
-    :host{all:initial;position:fixed;bottom:18px;right:18px;z-index:2147483647;font:13px/1.5 system-ui,sans-serif;color:#eef2ff;max-width:min(470px,calc(100vw - 36px))}
-    *{box-sizing:border-box}section{background:#172033;border:1px solid #52617a;border-radius:14px;padding:14px;box-shadow:0 6px 30px #0008}
-    header{display:flex;align-items:center;justify-content:space-between;gap:16px;font-weight:700}button,select{font:inherit;color:inherit;background:#28364f;border:1px solid #65758f;border-radius:7px;padding:6px 10px;cursor:pointer}button:disabled{opacity:.5;cursor:default}
-    .row{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.primary{background:#4f46e5;border-color:#818cf8}p{margin:8px 0 0}small{color:#cbd5e1}button[aria-pressed=true]{outline:2px solid #22d3ee}#error{color:#fda4af}#cancel{background:#7f1d1d}#close{padding:1px 7px}
+    :host{all:initial;position:fixed;bottom:16px;right:16px;z-index:2147483647;font:12px/1.5 MediaFlowPoppins,sans-serif;color:#f8fafc;width:360px;max-width:calc(100vw - 32px)}
+    *{box-sizing:border-box}.mf-icon{width:15px;height:15px;vertical-align:middle;flex-shrink:0}
+    section{background:#111827f5;border:1px solid #354158;border-radius:12px;padding:12px;box-shadow:0 6px 20px #0006}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .toolbar-brand{display:flex;align-items:center;gap:9px}.toolbar-brand>.mf-icon{width:26px;height:26px;padding:5px;background:#252e4b;border-radius:7px;color:#a5b4fc}
+    .toolbar-brand>span{display:flex;flex-direction:column}.toolbar-brand strong{font:600 12px/17px MediaFlowMontserrat,MediaFlowPoppins,sans-serif}.toolbar-brand small{font-size:9px;color:#94a3b8;line-height:13px}
+    button,select{font:inherit;color:inherit;background:#172033;border:1px solid #354158;border-radius:6px;padding:4px 8px;cursor:pointer;min-height:28px}
+    button:hover{background:#263149}button:focus-visible,select:focus-visible{outline:2px solid #a5b4fc;outline-offset:2px}button:disabled{opacity:.5;cursor:default}
+    .toolbar-status{padding:9px 0 8px}.toolbar-status p{margin:0;font-size:11px;line-height:17px}.toolbar-status small{display:block;color:#94a3b8;font-size:10px;margin-top:3px;font-variant-numeric:tabular-nums}
+    .row{display:flex;flex-wrap:wrap;gap:6px}.toolbar-selection{padding-bottom:10px}.toolbar-selection button{font-size:10px;background:transparent}
+    .toolbar-download{border-top:1px solid #2b3548;padding-top:10px;align-items:center;justify-content:space-between}
+    .quality-label{display:flex;align-items:center;gap:7px;font-size:10px;color:#94a3b8}.quality-label select{font-size:10px;max-width:130px}
+    .primary{background:#4f46e5;border-color:#6366f1;font-size:10px;font-weight:500;min-height:31px}.primary:hover{background:#4338ca}
+    button[aria-pressed=true]{border-color:#818cf8;color:#c7d2fe;background:#252e4b}
+    #error{color:#fda4af;margin:8px 0 0;font-size:10px;overflow-wrap:anywhere}#cancel{flex-basis:100%;background:transparent;border-color:#7f4047;color:#fda4af;font-size:10px}
+    #close{display:grid;place-items:center;width:26px;height:26px;min-height:26px;padding:4px;background:transparent}
     :host([hidden]),[hidden]{display:none!important}
-  </style><section aria-label="MediaFlow batch video selection"><header>MediaFlow · Batch selection<button id="close" aria-label="Minimize video selection">−</button></header>
-    <div id="body"><p id="hint" role="status"></p><small id="count"></small><div class="row"><button id="range">Select range</button><button id="new">Select new</button><button id="clear">Clear</button></div>
-    <div class="row"><select id="quality" aria-label="Download quality"><option value="240">240p</option><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="best" selected>Best available</option><option value="mp4">MP4 only</option></select><button id="download" class="primary">Batch download</button><button id="cancel" hidden>Cancel batch & downloads</button></div><p id="error" role="alert" hidden></p></div></section>`;
+  </style><section aria-label="MediaFlow batch video selection"><header><span class="toolbar-brand">${icon('list-video')}<span><strong>MediaFlow</strong><small>Profile selection</small></span></span><button id="close" aria-label="Minimize video selection" aria-expanded="true"></button></header>
+    <div id="body"><div class="toolbar-status"><p id="hint" role="status"></p><small id="count"></small></div><div class="row toolbar-selection"><button id="range">Select range</button><button id="new">Select new</button><button id="clear">Clear</button></div>
+    <div class="row toolbar-download"><label class="quality-label">Quality<select id="quality" aria-label="Download quality"><option value="240">240p</option><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="best" selected>Best available</option></select></label><button id="download" class="primary">Batch download</button><button id="cancel" hidden>Cancel batch & downloads</button></div><p id="error" role="alert" hidden></p></div></section>`;
   const style=document.createElement('style');style.id='mediaflow-selection-style';
-  style.textContent=`.mediaflow-pick-card{position:relative!important}.mediaflow-pick-selected{outline:3px solid #22c55e!important;outline-offset:2px!important}.mediaflow-pick-tick{all:initial!important;box-sizing:border-box!important;position:absolute!important;top:8px!important;left:8px!important;z-index:1000!important;background:#172033!important;color:#fff!important;border:2px solid #a5b4fc!important;border-radius:7px!important;padding:5px 8px!important;font:700 13px/1.3 system-ui,sans-serif!important;cursor:pointer!important;box-shadow:0 2px 8px #0008!important}.mediaflow-pick-tick[aria-checked=true]{background:#166534!important;border-color:#4ade80!important}.mediaflow-pick-tick:focus-visible{outline:3px solid #22d3ee!important}.mediaflow-pick-tick:disabled{cursor:default!important}`;
+  style.textContent=`.mediaflow-pick-card{position:relative!important}.mediaflow-pick-selected{outline:3px solid #818cf8!important;outline-offset:2px!important}.mediaflow-pick-tick{all:initial!important;box-sizing:border-box!important;position:absolute!important;top:8px!important;left:8px!important;z-index:1000!important;background:#172033!important;color:#fff!important;border:2px solid #a5b4fc!important;border-radius:7px!important;padding:5px 8px!important;font:700 13px/1.3 system-ui,sans-serif!important;cursor:pointer!important;box-shadow:0 2px 8px #0008!important}.mediaflow-pick-tick[aria-checked=true]{background:#252e4b!important;border-color:#a5b4fc!important}.mediaflow-pick-tick:focus-visible{outline:3px solid #a5b4fc!important}.mediaflow-pick-tick:disabled{cursor:default!important}`;
   document.documentElement.append(style);document.body.append(host);
+  style.textContent+=`@font-face{font-family:MediaFlowPoppins;src:url('${(chrome.runtime.getURL?.('assets/fonts/poppins-500.ttf') || new URL('../fonts/poppins-500.ttf',import.meta.url).href)}')}@font-face{font-family:MediaFlowMontserrat;src:url('${(chrome.runtime.getURL?.('assets/fonts/montserrat-variable.ttf') || new URL('../fonts/montserrat-variable.ttf',import.meta.url).href)}')}.mediaflow-pick-card{border-radius:16px!important}.mediaflow-pick-selected{outline:none!important;box-shadow:0 0 0 2px #818cf8!important;background-color:#6366f10d!important}.mediaflow-pick-tick{display:inline-flex!important;align-items:center!important;gap:5px!important;font-family:MediaFlowPoppins,sans-serif!important;border-width:1px!important;border-radius:12px!important;background:#111827ed!important;padding:7px 10px!important;box-shadow:0 4px 12px #0004!important}.mediaflow-pick-tick .mf-icon{width:16px!important;height:16px!important;pointer-events:none!important}.mediaflow-pick-tick[aria-checked=true]{background:#252e4bf2!important;border-color:#a5b4fc!important}`;
   let saved=await chrome.storage.local.get(['profileScanState','profileSelectionState','m3u8DownloadHistory','profileBatchState','downloadQueueState']);
   let cards=new Map(),profile,selection,view,pending=0,refreshTimer,scanRequest=false;
   const text=(id,value)=>{const node=shadow.getElementById(id);if(node.textContent!==value)node.textContent=value;};
@@ -60,12 +77,16 @@ export async function installProfilePageSelector() {
       if(present.has(card))continue;
       const video=profile.videos.find(video=>videoKey(video.url)===videoKey(url));if(!video)continue;
       let button=cards.get(card);
+      const owned=[...card.querySelectorAll('.mediaflow-pick-tick')];
+      if(!button || !button.isConnected)button=owned.shift();
+      for(const duplicate of owned)if(duplicate!==button)duplicate.remove();
       if(!button){button=document.createElement('button');button.type='button';button.className='mediaflow-pick-tick';button.setAttribute('role','checkbox');card.append(button);card.classList.add('mediaflow-pick-card');}
       button.dataset.videoKey=videoKey(url);
       const checked=view.keys.has(videoKey(url)),downloaded=!!downloadedRecord(history,url,video.videoUrl);
       const boundary=selection?.mode==='range' ? [selection.start===videoKey(url)?'Start':'',selection.end===videoKey(url)?'End':''].filter(Boolean).join(' / ') : '';
-      const label=(downloaded?'✓ Downloaded':checked?'✓ Selected':'○ Select')+(boundary?' · '+boundary:'');
-      if(button.textContent!==label)button.textContent=label;
+      const label=(checked?'Selected':'Select')+(boundary?' · '+boundary:'');
+      const markup=icon(checked?'check':'circle')+'<span>'+label+'</span>';
+      if(button.innerHTML!==markup)button.innerHTML=markup;
       button.setAttribute('aria-checked',String(checked));button.setAttribute('aria-label',label+': '+video.title);
       button.disabled=!!pending || downloaded && !(selection?.mode==='range' && !selection.end);
       card.classList.toggle('mediaflow-pick-selected',checked);present.set(card,button);
@@ -86,7 +107,8 @@ export async function installProfilePageSelector() {
     text('cancel',`Cancel batch & downloads${batchTasks?' ('+batchTasks+')':''}`);
     shadow.getElementById('cancel').disabled=!!pending || batch?.status==='cancelling';
   }
-  shadow.getElementById('close').onclick=()=>{const body=shadow.getElementById('body');body.hidden=!body.hidden;text('close',body.hidden?'+':'−');};
+  shadow.getElementById('close').innerHTML=icon('chevron-down');
+  shadow.getElementById('close').onclick=()=>{const body=shadow.getElementById('body');body.hidden=!body.hidden;shadow.getElementById('close').innerHTML=icon(body.hidden?'chevron-left':'chevron-down');shadow.getElementById('close').setAttribute('aria-expanded',String(!body.hidden));};
   for(const type of ['range','new','clear'])shadow.getElementById(type).onclick=()=>select({type});
   shadow.getElementById('download').onclick=async()=>{
     pending++;refresh();error('');

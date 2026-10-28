@@ -37,11 +37,11 @@ export const queueStorage={...queue,
     const id=`${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
     const url=String(value.url || '').trim(),raw=String(value.format || '').toLowerCase();
     const hls=raw==='hls'||raw==='m3u8'||/\.m3u8(?:[?#]|$)|\/hls\//i.test(url);
-    const format=hls?'m3u8':raw==='webm'?'webm':'mp4';
+    const format=!url && value.pageUrl?'pending':hls?'m3u8':raw==='webm'?'webm':'mp4';
     const task={id,url,format,fileName:value.fileName || '',quality:value.quality,pageUrl:value.pageUrl,headers:value.headers,
       title:value.title || value.fileName || '',thumbnail:value.thumbnail || '',thumbnails:value.thumbnails || [],creator:value.creator || '',
-      batchId:value.batchId,batchProfileKey:value.batchProfileKey,
-      status:'queued',createdAt:Date.now(),progress:0,finishNum:0,targetSegment:hls?0:1,errorNum:0,
+      batchId:value.batchId,batchProfileKey:value.batchProfileKey,outputFormat:value.outputFormat==='mp4'?'mp4':'source',
+      status:'queued',phase:'queued',retryCount:0,createdAt:Date.now(),progress:0,finishNum:0,targetSegment:hls?0:1,errorNum:0,
       opfsCacheFileName:`vd-ext-${id.replace(/[^a-zA-Z0-9_-]/g,'_')}.${hls?'ts':format}`};
     await queue.set(current => ({tasks:[...current.tasks,task]}));return id;
   },
@@ -55,13 +55,14 @@ export function sanitizeSubdir(value) {
   if(clean.length<=200)return clean;const truncated=clean.slice(0,200),last=truncated.lastIndexOf('/');return last>0?truncated.slice(0,last):truncated;
 }
 export const withSubdir=(name,subdir) => sanitizeSubdir(subdir) ? `${sanitizeSubdir(subdir)}/${name}` : name;
-const defaults={downloadSubdir:'',useChannelFolder:true,maxConcurrentTasks:6,showThumbnails:true};
+const defaults={downloadSubdir:'',useChannelFolder:true,maxConcurrentTasks:6,showThumbnails:true,outputFormat:'mp4'};
 const settings=createStorage('download-settings',defaults,{storageType:'local',liveUpdate:true});
 export const settingsStorage={...settings,
   async setDownloadSubdir(value) { const next=sanitizeSubdir(value);await settings.set(old => ({...defaults,...old,downloadSubdir:next}));return next; },
   async setUseChannelFolder(value) { const next=!!value;await settings.set(old => ({...defaults,...old,useChannelFolder:next}));return next; },
   async setMaxConcurrentTasks(value) { const next=Math.max(1,Math.min(20,Math.floor(Number(value)||6)));await settings.set(old => ({...defaults,...old,maxConcurrentTasks:next}));return next; },
   async getMaxConcurrentTasks() { return Number((await settings.get()).maxConcurrentTasks)||6; },
+  async setOutputFormat(value) {const next=value==='source'?'source':'mp4';await settings.set(old=>({...defaults,...old,outputFormat:next}));return next;},
   async setShowThumbnails(value) { const next=!!value;await settings.set(old => ({...defaults,...old,showThumbnails:next}));return next; }
 };
 export const getUseChannelFolder=value => value?.useChannelFolder!==false;
