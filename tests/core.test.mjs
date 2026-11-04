@@ -7,6 +7,7 @@ import {DirectDownloader} from '../assets/js/direct-downloader.js';
 import {installQueueManager} from '../assets/js/queue-manager.js';
 import {videoKey,downloadedRecord,sortQualities} from '../assets/js/video-details.js';
 import {selectionView,changeSelection} from '../assets/js/profile-selection.js';
+import {normalizeQueueLimit} from '../assets/js/queue-limits.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
 async function until(fn) { for(let i=0;i<200;i++){if(await fn())return;await sleep(5);}throw Error('Condition timed out'); }
@@ -134,6 +135,57 @@ async function queueHarness(tasks,limit=1,initialHistory=[],nativeDownloads=[]){
   return {manager,engines,queueStorage,historyRecords,tasks:()=>list,setLimit:async value=>{limit=value;for(const fn of subscribers)fn();await manager.schedule();}};
 }
 const task=id=>({id,url:`https://example.test/${id}.m3u8`,format:'m3u8',status:'queued',createdAt:Number(id),opfsCacheFileName:id});
+
+test('queue limits preserve zero, clamp old settings to twelve and persist across reads',async()=>{
+  assert.equal(normalizeQueueLimit(0),0);assert.equal(normalizeQueueLimit('0'),0);
+  assert.equal(normalizeQueueLimit(-1),0);assert.equal(normalizeQueueLimit(20),12);
+  assert.equal(normalizeQueueLimit(2.9),2);
+  for(const value of [null,undefined,'',NaN,Infinity,'invalid'])assert.equal(normalizeQueueLimit(value),6);
+  const {settingsStorage}=await import('../assets/js/storage.js');
+  await settingsStorage.setMaxConcurrentTasks(0);assert.equal(await settingsStorage.getMaxConcurrentTasks(),0);
+  await settingsStorage.setMaxConcurrentTasks(30);assert.equal(await settingsStorage.getMaxConcurrentTasks(),12);
+  await settingsStorage.setMaxConcurrentTasks(6);
+});
+
+test('zero holds new tasks; lowering the limit suspends excess engines and preserves explicit pauses',async()=>{
+  const h=await queueHarness([task('1'),task('2'),task('3'),{...task('4'),status:'paused'}],0);
+  assert.equal(h.engines.length,0);
+  await Promise.all([h.manager.resume('1'),h.manager.resume('2')]);assert.equal(h.engines.length,0);
+  await h.setLimit(3);assert.equal(h.engines.length,3);
+  await h.setLimit(1);
+  assert.equal(h.tasks().filter(t=>t.status==='downloading').length,1);
+  assert.equal(h.engines[1].pauses,1);assert.equal(h.engines[2].pauses,1);
+  await h.setLimit(0);assert.equal(h.tasks().filter(t=>t.status==='downloading').length,0);
+  assert.equal(h.tasks().filter(t=>t.status==='queued').length,3);
+  assert.equal(h.tasks().find(t=>t.id==='4').status,'paused');
+  await h.setLimit(2);assert.equal(h.tasks().filter(t=>t.status==='downloading').length,2);
+  assert.equal(h.engines.length,3,'resume must reuse caches instead of creating duplicate engines');
+  for(const t of h.tasks())await h.manager.remove(t.id);
+});
+
+test('limit zero pauses an active browser save and resumes it only after capacity returns',async()=>{
+  const h=await queueHarness([task('1')],1);
+  h.engines[0].cb.onProgress({isFileDownloading:true,chromeDownloadId:42,bytesReceived:123});
+  await h.setLimit(0);assert.deepEqual(mock.paused,[42]);assert.equal(h.tasks()[0].status,'queued');
+  mock.downloads.onChanged.emit({id:42,paused:{current:true}});
+  await sleep(5);assert.equal(h.tasks()[0].status,'queued','a late native pause event must retain its queue position');
+  await h.manager.resume('1');assert.deepEqual(mock.resumed,[]);
+  await h.setLimit(1);assert.deepEqual(mock.resumed,[42]);
+  await h.manager.remove('1');
+});
+
+test('zero also holds browser saves recovered after the coordinator restarts',async()=>{
+  const h=await queueHarness([{...task('1'),status:'downloading',chromeDownloadId:42,cachedBytes:123}],0,[],[{id:42,state:'in_progress',paused:false}]);
+  assert.deepEqual(mock.paused,[42]);assert.equal(h.tasks()[0].status,'queued');
+  await h.setLimit(1);assert.deepEqual(mock.resumed,[42]);await h.manager.remove('1');
+});
+
+test('retry rebuilds older converted MP4 files instead of exporting the stale output',async()=>{
+  const h=await queueHarness([{...task('1'),status:'error',outputFormat:'mp4',outputExtension:'mp4',outputReady:true,outputCacheFileName:'old.mp4'}],1);
+  await h.manager.resume('1');
+  assert.equal(h.engines.length,1);assert.equal(h.engines[0].started,true);assert.equal(h.tasks()[0].outputReady,false);
+  await h.manager.remove('1');
+});
 test('resuming a paused browser save waits behind the same global concurrency limit',async()=>{
   const h=await queueHarness([task('1'),task('2')]);
   h.engines[0].cb.onProgress({progress:95,bytesReceived:100,isFileDownloading:true,chromeDownloadId:42});

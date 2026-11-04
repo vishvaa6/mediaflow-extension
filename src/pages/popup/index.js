@@ -6,6 +6,7 @@ import {isXPage} from '../../../assets/js/x-media.js';
 import {isMissavPage} from '../../../assets/js/missav-media.js';
 import {icon} from '../../../assets/js/icons.js';
 import {createPopupSurface} from '../../../assets/js/popup-surface.js';
+import {normalizeQueueLimit} from '../../../assets/js/queue-limits.js';
 const popupSurface=createPopupSurface();
 const isManagedPage=value=>isXPage(value) || isMissavPage(value);
 import {
@@ -62,7 +63,7 @@ function t(key, substitutions) {
     profileNoVideosFound: "No profile videos detected yet. Navigate to a creator profile page or paste the URL above.",
     profileBatchSuccess: "Enqueued $1 profile videos!",
     settingsMaxConcurrent: "Queue Concurrency Limit",
-    settingsMaxConcurrentHint: "Number of simultaneous active downloads (Default: 6). Higher values increase concurrency but use more bandwidth.",
+    settingsMaxConcurrentHint: "Use 0-12 simultaneous downloads. 0 holds the queue. Lower limits use less RAM.",
     toastDownloadComplete: "Download completed: $1",
     toastDownloadFailed: "Download failed: $1",
     toastEnqueued: "Added to download queue",
@@ -414,7 +415,7 @@ async function batchDownloadProfileVideos() {
   state.batchProgress = 'Starting batch…';
   render();
   try {
-    const response = await chrome.runtime.sendMessage({type:'profile-batch-start',videos,quality:state.profileQuality,profileName:state.profileName,profileUrl:state.profileUrl,useChannelFolder:state.useChannelFolder});
+    const response = await chrome.runtime.sendMessage({type:'profile-batch-start',videos,quality:state.profileQuality,outputFormat:state.outputFormat,profileName:state.profileName,profileUrl:state.profileUrl,useChannelFolder:state.useChannelFolder});
     if (!response?.success) throw Error(response?.error || 'Could not start batch');
     state.profileBatchId=response.batchId || state.profileBatchId;
   } catch (error) { state.isBatchEnqueuing = false; showToast(error.message,'error'); }
@@ -423,6 +424,7 @@ async function batchDownloadProfileVideos() {
 // Main Render Function
 // ---- Live progress helpers ----
 function taskStatusLabel(task) {
+  if(task.status==='downloading' && task.phase==='downloading-mp4')return 'Downloading + MP4';
   if(task.status==='queued' && task.nextRetryAt>Date.now())return `Retry ${task.retryCount}/3 · waiting`;
   if (task.status === 'paused' || task.status === 'queued' || task.status === 'error') return task.status;
   if(task.phase==='resolving')return 'Resolving source…';
@@ -574,6 +576,12 @@ function renderTabContent() {
 }
 
 // Downloads: source choices and queue progress
+function outputFormatControl(id,label='Save as') {
+  return `<label class="profile-quality-label output-format-control" for="${id}"><span>${label}</span><select id="${id}" class="profile-quality-select" data-output-format aria-label="${label}" title="Fast MP4 keeps video quality and converts compatible HLS during download. Unsupported codecs keep their original format."><option value="mp4" ${state.outputFormat==='mp4'?'selected':''}>MP4 (fast)</option><option value="source" ${state.outputFormat==='source'?'selected':''}>Original format</option></select></label>`;
+}
+function queueLimitControl() {
+  return `<label class="profile-quality-label" for="queue-limit"><span>Queue limit</span><select id="queue-limit" class="profile-quality-select" data-queue-limit aria-label="Queue limit" title="Simultaneous downloads. 0 holds the queue; lower limits use less RAM.">${Array.from({length:13},(_,n)=>`<option value="${n}" ${state.maxConcurrentTasks===n?'selected':''}>${n===0?'0 — Hold':n}</option>`).join('')}</select></label>`;
+}
 function renderVideoQueueTab() {
   const downloadingCount = state.tasks.filter(t => t.status === 'downloading').length;
   const queuedCount = state.tasks.filter(t => t.status === 'queued').length;
@@ -601,6 +609,7 @@ function renderVideoQueueTab() {
           <input type="text" class="filename-input" id="filename-editor-input" 
                  value="${escapeHtml(state.customFilename)}" placeholder="${t('popupFilenamePlaceholder')}" />
         </label>
+        <div class="download-format-options">${outputFormatControl('download-output-format')}<p class="download-format-hint">${state.outputFormat==='mp4'?'Compatible HLS converts during download without losing quality. WebM and unsupported codecs keep their original format.':'Save the original format without conversion.'}</p></div>
         <div class="qualities-list">
           ${state.detectedVideos.map((video, idx) => {
             const isAlreadyQueued = state.tasks.some(task => task.url === video.videoUrl && task.status !== 'error');
@@ -617,7 +626,7 @@ function renderVideoQueueTab() {
                   <span class="format-badge">${escapeHtml(fmtDisplay)}</span>
                 </div>
                 <button class="btn-download-action" data-download-index="${idx}" ${isAlreadyQueued ? 'disabled' : ''}>
-                  ${isAlreadyQueued ? icon('check')+' In Queue' : icon('download')+' '+t('popupActionDownload')}
+                  ${isAlreadyQueued ? icon('check')+' In Queue' : icon('download')+' '+t('popupActionDownload')+(state.outputFormat==='mp4'?' '+(fmtDisplay==='webm'?'WebM':'MP4'):'')}
                 </button>
               </div>
             `;
@@ -644,6 +653,7 @@ function renderVideoQueueTab() {
           <span class="queue-summary">${downloadingCount} active · ${queuedCount} waiting${erroredCount?' · '+erroredCount+' need attention':''}</span>
         </div>
         <div class="queue-header-actions">
+          ${queueLimitControl()}
           ${queuedCount > 0 ? `<button class="btn-text-sm" id="btn-clear-queued">${t('queueActionClearQueued')}</button>` : ''}
           ${erroredCount > 0 ? `<button class="btn-text-sm" id="btn-clear-errors" style="color:var(--accent-rose);font-weight:600;">Clear ${erroredCount} Errors</button>` : ''}
         </div>
@@ -749,7 +759,7 @@ function renderProfileTab() {
     ${totalCount?`
       <div class="profile-selection-toolbar" aria-label="Video selection tools">
         <div class="profile-selection-actions"><button class="btn-pill-action" id="btn-profile-select-all" ${!newCount || state.isBatchEnqueuing?'disabled':''}>Select new</button><button class="btn-pill-action" id="btn-profile-range" aria-pressed="false">Select range</button><button class="btn-pill-action" id="btn-profile-clear-selection">Clear</button></div>
-        <label class="profile-quality-label"><span>Quality</span><select class="profile-quality-select" id="profile-quality-select" aria-label="Download quality">${[['best','Best available'],['1080','1080p'],['720','720p'],['480','480p'],['240','240p']].map(([value,label])=>`<option value="${value}" ${state.profileQuality===value?'selected':''}>${label}</option>`).join('')}</select></label>
+        <div class="profile-download-options"><label class="profile-quality-label"><span>Quality</span><select class="profile-quality-select" id="profile-quality-select" aria-label="Download quality">${[['best','Best available'],['1080','1080p'],['720','720p'],['480','480p'],['240','240p']].map(([value,label])=>`<option value="${value}" ${state.profileQuality===value?'selected':''}>${label}</option>`).join('')}</select></label>${outputFormatControl('profile-output-format')}</div>
       </div>
       <p class="profile-range-hint" data-role="profile-range-hint" role="status" ${rangeActive?'':'hidden'}>${escapeHtml(rangeHint(currentProfileSelection(),profileSelectionView()))}</p>
       <div class="profile-results-heading"><label class="search-field profile-filter">${icon('search')}<input type="search" id="profile-filter-input" value="${escapeHtml(state.profileSearchQuery)}" aria-label="Search loaded profile videos" placeholder="Search loaded videos"></label><nav class="profile-grid-pagination" aria-label="Profile video pages"><button class="btn-page" id="profile-grid-prev" aria-label="Previous videos" title="Previous videos" ${state.profileGridPage===0?'disabled':''}>${icon('chevron-left')}</button><span>${matches.length?'Showing '+(state.profileGridPage*pageSize+1)+'–'+Math.min((state.profileGridPage+1)*pageSize,matches.length)+' of '+matches.length:'No matches'}</span><button class="btn-page" id="profile-grid-next" aria-label="Next videos" title="Next videos" ${state.profileGridPage+1>=pageCount?'disabled':''}>${icon('chevron-right')}</button></nav></div>
@@ -799,7 +809,7 @@ function renderSettingsTab() {
       <section class="settings-section" aria-labelledby="settings-downloads-title"><div class="settings-section-heading">${icon('download')}<h2 id="settings-downloads-title">Download behavior</h2></div>
         <div class="settings-panel">
           <div class="setting-card-row"><div class="setting-label-col"><label class="setting-title" for="output-format-select">Download format</label><span class="setting-desc">Prefer MP4. Other streams keep their playable original format.</span></div><select id="output-format-select" class="profile-quality-select" aria-label="Download format"><option value="mp4" ${state.outputFormat==='mp4'?'selected':''}>MP4 preferred</option><option value="source" ${state.outputFormat==='source'?'selected':''}>Original format</option></select></div>
-          <div class="setting-card-row"><div class="setting-label-col"><span class="setting-title">${t('settingsMaxConcurrent')}</span><span class="setting-desc">Use 1–20 download slots. Extra videos wait in the queue.</span></div><div class="concurrency-stepper"><button class="btn-stepper" id="btn-concurrency-minus" aria-label="Decrease queue concurrency" ${state.maxConcurrentTasks<=1?'disabled':''}>−</button><span class="concurrency-val">${state.maxConcurrentTasks}</span><button class="btn-stepper" id="btn-concurrency-plus" aria-label="Increase queue concurrency" ${state.maxConcurrentTasks>=20?'disabled':''}>+</button></div></div>
+          <div class="setting-card-row"><div class="setting-label-col"><span class="setting-title">${t('settingsMaxConcurrent')}</span><span class="setting-desc">0-12 simultaneous downloads. 0 holds the queue. Lower limits use less RAM; excess downloads keep their progress.</span></div><div class="concurrency-stepper"><button class="btn-stepper" id="btn-concurrency-minus" aria-label="Decrease queue concurrency" ${state.maxConcurrentTasks<=0?'disabled':''}>-</button><span class="concurrency-val">${state.maxConcurrentTasks}</span><button class="btn-stepper" id="btn-concurrency-plus" aria-label="Increase queue concurrency" ${state.maxConcurrentTasks>=12?'disabled':''}>+</button></div></div>
         </div>
       </section>
       <section class="settings-section" aria-labelledby="settings-files-title"><div class="settings-section-heading">${icon('folder')}<h2 id="settings-files-title">Files and folders</h2></div>
@@ -823,7 +833,12 @@ function bindEvents() {
   });
   document.querySelector('#profile-source-details')?.addEventListener('toggle',event=>{if(event.target.isConnected)state.profileSourceOpen=event.target.open;});
   document.querySelectorAll('button[title]').forEach(button=>{if(!button.hasAttribute('aria-label') && !button.textContent.trim())button.setAttribute('aria-label',button.title);});
-  document.querySelector('#output-format-select')?.addEventListener('change',async event=>{try{await settingsStorage.setOutputFormat(event.target.value);}catch(error){showToast(error.message,'error');}});
+  document.querySelectorAll('[data-output-format], #output-format-select').forEach(select=>select.addEventListener('change',async event=>{
+    const previous=state.outputFormat;
+    state.outputFormat=event.target.value==='source'?'source':'mp4';
+    try{await settingsStorage.setOutputFormat(state.outputFormat);}
+    catch(error){state.outputFormat=previous;render();showToast(error.message,'error');}
+  }));
   document.querySelector('#btn-clear-profile-results')?.addEventListener('click',async()=>{
     if(state.isClearingProfile)return;
     state.isClearingProfile=true;render();
@@ -894,6 +909,7 @@ function bindEvents() {
           url: video.videoUrl,
           fileName: cleanTitle,
           format: normalizedFmt,
+          outputFormat: state.outputFormat,
           quality: qualStr,
           pageUrl: video.pageUrl || state.activePageUrl,
           title:video.title || state.activePageTitle || title,thumbnail:video.thumbnail || state.videoThumbnail,thumbnails:video.thumbnails || state.videoThumbnails,
@@ -1030,18 +1046,22 @@ function bindEvents() {
   }
 
   // Settings: Concurrency Stepper
+  document.querySelector('[data-queue-limit]')?.addEventListener('change',async event=>{
+    state.maxConcurrentTasks=await settingsStorage.setMaxConcurrentTasks(event.target.value);
+    render();
+  });
   const minusBtn = document.querySelector('#btn-concurrency-minus');
   const plusBtn = document.querySelector('#btn-concurrency-plus');
   if (minusBtn && plusBtn) {
     minusBtn.addEventListener('click', async () => {
-      if (state.maxConcurrentTasks > 1) {
+      if (state.maxConcurrentTasks > 0) {
         state.maxConcurrentTasks -= 1;
         await settingsStorage.setMaxConcurrentTasks(state.maxConcurrentTasks);
         render();
       }
     });
     plusBtn.addEventListener('click', async () => {
-      if (state.maxConcurrentTasks < 20) {
+      if (state.maxConcurrentTasks < 12) {
         state.maxConcurrentTasks += 1;
         await settingsStorage.setMaxConcurrentTasks(state.maxConcurrentTasks);
         render();
@@ -1090,7 +1110,7 @@ async function init() {
   if (settings) {
     state.downloadSubdir = settings.downloadSubdir || '';
     state.useChannelFolder = settings.useChannelFolder !== false;
-    state.maxConcurrentTasks = settings.maxConcurrentTasks || 6;
+    state.maxConcurrentTasks = normalizeQueueLimit(settings.maxConcurrentTasks);
     state.outputFormat=settings.outputFormat || 'mp4';
     state.showThumbnails=settings.showThumbnails!==false;
   }
@@ -1100,7 +1120,7 @@ async function init() {
     if (s) {
       state.downloadSubdir = s.downloadSubdir || '';
       state.useChannelFolder = s.useChannelFolder !== false;
-      state.maxConcurrentTasks = s.maxConcurrentTasks || 6;
+      state.maxConcurrentTasks = normalizeQueueLimit(s.maxConcurrentTasks);
       state.outputFormat=s.outputFormat || 'mp4';
       state.showThumbnails=s.showThumbnails!==false;
       render();

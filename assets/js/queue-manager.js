@@ -12,6 +12,8 @@ import {isMissavPage} from './missav-media.js';
 import {OffscreenDownload} from './offscreen-client.js';
 import {fetchBytes,networkError,transientError,retryDelay,errorData,restoreError} from './network.js';
 import {installWindowManager} from './window-manager.js';
+import {normalizeQueueLimit} from './queue-limits.js';
+import {MP4_CONVERTER_VERSION} from './mp4-output.js';
 
 export function installQueueManager({queueStorage, historyStorage, settingsStorage, HlsDownloader = PersistentHlsDownloader, registerBlob, bindBlob, clearBlob, formatFilename, withSubdir}) {
   const active = new Map(), operations = new Map(), meter = new SpeedMeter();
@@ -27,6 +29,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
   let selectionOperation = Promise.resolve();
   const cancelledBatches = new Set();
   const taskById = async id => (await queueStorage.get()).tasks.find(t => t.id === id);
+  const needsMp4Rebuild=task=>task.format==='m3u8' && task.outputFormat==='mp4' && task.outputExtension==='mp4' && task.outputConverterVersion!==MP4_CONVERTER_VERSION;
   const patch = (id, value) => queueStorage.updateTask(id, value);
   const notify = message => chrome.runtime.sendMessage(message).catch(() => {});
   const remoteInstance=(task,entry)=>new OffscreenDownload({task:{...task,downloadSubdir:entry.subdir},ensureOffscreen,
@@ -138,7 +141,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     error=networkError(error);
     const current=await taskById(task.id),retryCount=Number(current?.retryCount)||0;
     const retry=transientError(error) && retryCount<3;
-    await patch(task.id,{outputReady:entry.task.outputReady,outputCacheFileName:entry.task.outputCacheFileName,outputExtension:entry.task.outputExtension,outputBytes:entry.task.outputBytes,fallbackReason:entry.task.fallbackReason,
+    await patch(task.id,{outputReady:entry.task.outputReady,outputCacheFileName:entry.task.outputCacheFileName,outputExtension:entry.task.outputExtension,outputBytes:entry.task.outputBytes,outputConverterVersion:entry.task.outputConverterVersion,fallbackReason:entry.task.fallbackReason,
       status:retry?'queued':'error',phase:retry?'waiting':'error',error:error.message,errorCode:error.code || error.name,retryCount:retry?retryCount+1:retryCount,
       nextRetryAt:retry?Date.now()+retryDelay(retryCount+1,error.retryAfter):undefined,downloadSpeed:0,speedFormatted:'',isFileDownloading:false,chromeDownloadId:undefined,cachedBytes:entry.instance?.getBytesReceived?.() || task.cachedBytes});
     await entry.instance?.destroy?.(false);
@@ -163,6 +166,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     if (data.totalBytes > 0) value.totalBytes = data.totalBytes;
     if (data.outputExtension) value.outputExtension = data.outputExtension;
     if(data.outputBytes>0)value.outputBytes=data.outputBytes;
+    if(data.outputConverterVersion)value.outputConverterVersion=data.outputConverterVersion;
     if(data.phase)value.phase=data.phase;
     if(data.fallbackReason)value.fallbackReason=data.fallbackReason;
     if(data.outputCacheFileName){value.outputCacheFileName=data.outputCacheFileName;value.outputReady=!!data.isFileDownloading || data.phase==='saving';}
@@ -201,7 +205,8 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       entry.subdir = settings.downloadSubdir || '';
       const cb = callbacks(fresh,entry);
       const saveForTask = options => saveFile({...options,entry});
-      if(fresh.outputReady && fresh.outputCacheFileName){await exportCachedSave(fresh,entry);return;}
+      if(fresh.outputReady && fresh.outputCacheFileName && !needsMp4Rebuild(fresh)){await exportCachedSave(fresh,entry);return;}
+      if(needsMp4Rebuild(fresh)){fresh.outputReady=false;await patch(task.id,{outputReady:false});}
       if(useOffscreen){
         entry.instance=remoteInstance(fresh,entry);
         await patch(task.id,{status:'downloading',phase:fresh.url?'downloading':'resolving',startedAt:fresh.startedAt || Date.now(),nextRetryAt:undefined,error:undefined,downloadSpeed:0,isFileDownloading:false});
@@ -253,7 +258,17 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     try {
       while (reschedule) {
         reschedule = false;
-        const limit = Math.max(1,Math.min(20,Math.floor(Number((await settingsStorage.get()).maxConcurrentTasks) || 6)));
+        const limit = normalizeQueueLimit((await settingsStorage.get()).maxConcurrentTasks);
+        // Suspend newest transfers first. pauseSoft commits the current cache
+        // and terminates offscreen workers, so lowering the limit releases RAM.
+        const snapshot=(await queueStorage.get()).tasks;
+        const running=snapshot.filter(t=>t.status==='downloading' || active.has(t.id) && !active.get(t.id).paused && !active.get(t.id).finished).sort((a,b)=>a.createdAt-b.createdAt);
+        for(const {id} of running.slice(limit).reverse()){
+          await serial(id,async()=>{
+            const task=await taskById(id);if(task?.status!=='downloading')return;
+            await pause(id,true);
+          });
+        }
         const tasks = (await queueStorage.get()).tasks;
         for (const task of tasks.filter(t => t.status === 'queued').sort((a,b) => a.createdAt-b.createdAt)) {
           if (cancelledBatches.has(task.batchId)) continue;
@@ -271,11 +286,14 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       else chrome.alarms?.clear('mediaflow-queue-retry');
     }
   }
-  async function pause(id) {
+  async function pause(id,queueLimited=false) {
     const task = await taskById(id);
     if (!task) throw Error('Task not found');
     if (task.status === 'paused') return;
     if (!['queued','downloading','error'].includes(task.status)) throw Error('Task cannot be paused');
+    // Native pause events may arrive after this operation; persist the reason
+    // before pausing so those events cannot turn a held task into a manual pause.
+    await patch(id,{queueLimited});
     const entry = active.get(id);
     if (entry) {
       entry.paused = true;
@@ -289,13 +307,20 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       } else {entry.controller?.abort();await entry.instance?.pauseSoft();}
       entry.latestProgress = null;
     } else if (typeof task.chromeDownloadId === 'number') await chrome.downloads.pause(task.chromeDownloadId);
-    if (await taskById(id)) await patch(id,{status:'paused',cachedBytes:entry?.instance?.getBytesReceived?.() ?? task.cachedBytes,downloadSpeed:0,speedFormatted:''});
+    if (await taskById(id)) await patch(id,{status:queueLimited?'queued':'paused',...(queueLimited?{phase:'waiting'}:{}),cachedBytes:entry?.instance?.getBytesReceived?.() ?? task.cachedBytes,downloadSpeed:0,speedFormatted:''});
     meter.clear(id);
     schedule();
   }
   async function exportCachedSave(task, previous) {
     // Some browsers cannot resume an interrupted blob download. Save the same
     // committed cache again instead of leaving the task permanently paused.
+    if(needsMp4Rebuild(task)){
+      const oldId=previous?.saveId ?? task.chromeDownloadId;
+      if(typeof oldId==='number')await chrome.downloads.cancel(oldId).catch(()=>{});
+      if(previous){previous.finished=true;clearTimeout(previous.progressTimer);await previous.instance?.destroy?.(false);}
+      active.delete(task.id);
+      await patch(task.id,{status:'queued',outputReady:false,chromeDownloadId:undefined,isFileDownloading:false});schedule();return;
+    }
     const entry = {kind:task.format === 'm3u8' ? 'm3u8' : 'mp4',phase:'saving',paused:false,task,
       instance:{getBytesReceived:() => task.cachedBytes || task.fetchedBytes || 0,destroy:async()=>{}}};
     if (previous) { previous.finished = true; clearTimeout(previous.progressTimer); }
@@ -320,7 +345,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     if (!task) throw Error('Task not found');
     let entry = active.get(id);
     if (task.status !== 'queued') return;
-    const limit = Math.max(1,Math.min(20,Math.floor(Number((await settingsStorage.get()).maxConcurrentTasks) || 6)));
+    const limit = normalizeQueueLimit((await settingsStorage.get()).maxConcurrentTasks);
     const occupied = [...active.values()].filter(e => !e.paused && !e.finished).length + (await queueStorage.get()).tasks.filter(t => t.status === 'downloading' && !active.has(t.id)).length;
     if (occupied >= limit) {
       // Leave cached paused engines intact; scheduler resumes these when a slot opens.
@@ -653,7 +678,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
         if(!entry)active.set(task.id,recovered);
         await failed(task,recovered,Error(delta.error?.current || 'File save interrupted'));
       }
-      else if (delta.paused) await patch(task.id,{status:delta.paused.current ? 'paused' : 'downloading'});
+      else if (delta.paused) await patch(task.id,{status:delta.paused.current ? task.queueLimited?'queued':'paused' : 'downloading'});
     }
   });
   settingsStorage.subscribe(() => schedule());

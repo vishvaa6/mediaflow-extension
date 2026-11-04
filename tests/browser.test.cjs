@@ -49,6 +49,21 @@ const server = http.createServer((req,res) => {
     },{origin});
     await page.goto(origin+'/src/pages/popup/index.html');
     await page.waitForSelector('.task-speed-badge');
+    assert.equal(await page.locator('#queue-limit option').count(),13);
+    await page.locator('#queue-limit').selectOption('0');
+    await page.waitForFunction(()=>document.querySelector('#queue-limit')?.value==='0');
+    assert.equal(await page.evaluate(async()=>(await testStorage.get('download-settings'))['download-settings'].maxConcurrentTasks),0);
+    await page.locator('[data-tab="settings"]').click();
+    assert.equal(await page.locator('.concurrency-val').innerText(),'0');
+    assert.equal(await page.locator('#btn-concurrency-minus').isDisabled(),true);
+    await page.locator('#btn-concurrency-plus').click();
+    await page.waitForFunction(()=>document.querySelector('.concurrency-val')?.textContent==='1');
+    await page.evaluate(async()=>{const {settingsStorage}=await import('/assets/js/storage.js');await settingsStorage.setMaxConcurrentTasks(20);});
+    await page.waitForFunction(()=>document.querySelector('.concurrency-val')?.textContent==='12');
+    assert.equal(await page.locator('#btn-concurrency-plus').isDisabled(),true);
+    await page.locator('[data-tab="video"]').click();assert.equal(await page.locator('#queue-limit').inputValue(),'12');
+    assert.equal(await page.locator('#download-output-format').inputValue(),'mp4');
+    assert.match(await page.locator('.btn-download-action').first().innerText(),/Download MP4/);
     assert.deepEqual(await page.locator('.qualities-list .quality-badge').allTextContents(),['240','240','480','480','720','720','1080','1080']);
     await page.evaluate(async()=>{
       const original=chrome.runtime.sendMessage;
@@ -151,7 +166,19 @@ const server = http.createServer((req,res) => {
     await page.locator('[data-tab="history"]').click();
     await page.locator('#btn-clear-history').click();
     await page.waitForFunction(()=>document.querySelector('[data-role="history-count"]')?.textContent==='0');
-    await page.locator('[data-tab="video"]').click();await page.locator('.btn-download-action').first().click();
+    await page.locator('[data-tab="video"]').click();
+    await page.locator('#download-output-format').selectOption('source');
+    await page.waitForFunction(()=>document.querySelector('.btn-download-action')?.textContent.trim()==='Download');
+    await page.locator('.btn-download-action').first().click();
+    assert.equal(await page.evaluate(()=>sentMessages.find(message=>message.type==='download-queue-enqueue')?.outputFormat),'source');
+    await page.locator('[data-tab="profile"]').click();
+    assert.equal(await page.locator('#profile-output-format').inputValue(),'source','format choice must follow navigation');
+    await page.locator('#profile-output-format').selectOption('mp4');
+    await page.waitForFunction(()=>document.querySelector('#profile-output-format')?.value==='mp4');
+    await page.locator('[data-tab="video"]').click();
+    assert.equal(await page.locator('#download-output-format').inputValue(),'mp4');
+    await page.locator('.btn-download-action').first().click();
+    assert.equal(await page.evaluate(()=>sentMessages.filter(message=>message.type==='download-queue-enqueue').at(-1)?.outputFormat),'mp4');
     assert.deepEqual(await page.evaluate(()=>sentMessages.find(message=>message.type==='download-queue-enqueue')?.headers),{Origin:'https://javplayer.cc',Referer:'https://javplayer.cc/'});
     const generic=await page.evaluate(async()=>{
       const {detectDocumentMedia}=await import('/assets/js/media-detection.js');
@@ -253,6 +280,10 @@ const server = http.createServer((req,res) => {
     const narrowAction=await page.locator('#btn-batch-download').boundingBox();
     assert.ok(narrowAction.x+narrowAction.width<=480-22,'batch cancellation and download actions must fit beside the resize grip');
     assert.deepEqual(await page.evaluate(()=>browserWindowMutations),[]);
+    await page.locator('#profile-output-format').selectOption('source');
+    await page.waitForFunction(()=>document.querySelector('#profile-output-format')?.value==='source');
+    await page.locator('#btn-batch-download').click();
+    assert.equal(await page.evaluate(()=>sentMessages.filter(message=>message.type==='profile-batch-start').at(-1)?.outputFormat),'source','batch requests must capture the chosen format');
     await page.goto(origin+'/generic-test');
     await page.waitForFunction(()=>sentMessages.some(message=>message.type==='media-detection-report' && message.videoInfos.some(video=>video.format==='webm')));
     const frame=page.frames().find(frame=>frame.url().endsWith('/generic-frame'));assert.ok(frame);

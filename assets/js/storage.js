@@ -1,3 +1,4 @@
+import {normalizeQueueLimit} from './queue-limits.js';
 export const StorageType = {Local:'local',Sync:'sync',Managed:'managed',Session:'session'};
 export function createStorage(key, defaults, options = {}) {
   const area = options.storageType || 'local';
@@ -60,8 +61,8 @@ const settings=createStorage('download-settings',defaults,{storageType:'local',l
 export const settingsStorage={...settings,
   async setDownloadSubdir(value) { const next=sanitizeSubdir(value);await settings.set(old => ({...defaults,...old,downloadSubdir:next}));return next; },
   async setUseChannelFolder(value) { const next=!!value;await settings.set(old => ({...defaults,...old,useChannelFolder:next}));return next; },
-  async setMaxConcurrentTasks(value) { const next=Math.max(1,Math.min(20,Math.floor(Number(value)||6)));await settings.set(old => ({...defaults,...old,maxConcurrentTasks:next}));return next; },
-  async getMaxConcurrentTasks() { return Number((await settings.get()).maxConcurrentTasks)||6; },
+  async setMaxConcurrentTasks(value) { const next=normalizeQueueLimit(value);await settings.set(old => ({...defaults,...old,maxConcurrentTasks:next}));return next; },
+  async getMaxConcurrentTasks() { return normalizeQueueLimit((await settings.get()).maxConcurrentTasks); },
   async setOutputFormat(value) {const next=value==='source'?'source':'mp4';await settings.set(old=>({...defaults,...old,outputFormat:next}));return next;},
   async setShowThumbnails(value) { const next=!!value;await settings.set(old => ({...defaults,...old,showThumbnails:next}));return next; }
 };

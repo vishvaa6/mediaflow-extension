@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:media": "node --test tests/mp4-playback.test.mjs",
     "test:offscreen": "node tests/offscreen-browser.test.cjs",
     "test": "node --test tests/core.test.mjs tests/hls.test.mjs tests/site-compat.test.mjs tests/x.test.mjs tests/missav.test.mjs tests/reliability.test.mjs && node tests/background-smoke.mjs",
     "test:browser": "node tests/browser.test.cjs && node tests/profile-selection-browser.test.cjs && node tests/hls-browser.test.cjs && node tests/x-browser.test.cjs && node tests/missav-browser.test.cjs && node tests/offscreen-browser.test.cjs"

@@ -103,6 +103,14 @@ async function createBackground(){
   await until(()=>new Set([...held].map(job=>job.id)).size===2,'two active transfers');
   assert.equal(values.downloadQueueState.tasks.length,4);assert.equal(values.downloadQueueState.tasks.filter(task=>task.status==='queued').length,2);
   assert.equal(requests.has('/watch/2'),false,'queued pages must not resolve early');
+  await background.evaluate(async()=>{await (await import('/assets/js/storage.js')).settingsStorage.setMaxConcurrentTasks(0);await manager.schedule();});
+  await until(()=>values.downloadQueueState.tasks.every(task=>task.status==='queued'),'zero holds every transfer');
+  const heldRuns=await background.evaluate(()=>chrome.runtime.sendMessage({type:'mf-offscreen-command',command:'snapshot'}));
+  assert.equal(heldRuns.runs.length,0,'holding the queue must terminate workers to release their RAM');
+  await background.evaluate(async()=>{await (await import('/assets/js/storage.js')).settingsStorage.setMaxConcurrentTasks(1);await manager.schedule();});
+  await until(()=>values.downloadQueueState.tasks.filter(task=>task.status==='downloading').length===1,'resume one transfer');
+  await background.evaluate(async()=>{await (await import('/assets/js/storage.js')).settingsStorage.setMaxConcurrentTasks(2);await manager.schedule();});
+  await until(()=>new Set([...held].map(job=>job.id)).size===2,'resume two transfers');
   const duplicate=await dispatch(background,{type:'profile-batch-start',profileName:'Fixture',profileUrl:origin+'/model/fixture',quality:'best',videos},{id:'fixture'});
   assert.equal(duplicate.success,true);await until(()=>values.profileBatchState.status==='complete','duplicate batch');assert.equal(values.downloadQueueState.tasks.length,4);
   // Terminate the coordinator while real offscreen workers have requests open.
@@ -118,6 +126,18 @@ async function createBackground(){
     assert.ok(metadata.streams.some(stream=>stream.codec_type==='video' && stream.codec_name==='h264'));
     assert.ok(metadata.streams.some(stream=>stream.codec_type==='audio' && stream.codec_name==='aac'));
     assert.ok(Math.abs(Number(metadata.format.duration)-2)<.3,metadata.format.duration);
+    command('ffmpeg',['-v','error','-xerror','-i',entry.file,'-f','null','-']);
+    command('ffmpeg',['-v','error','-xerror','-ss','1','-i',entry.file,'-frames:v','3','-f','null','-']);
+    await background.evaluate(async bytes=>{
+      const url=URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:'video/mp4'})),video=document.createElement('video');video.muted=true;
+      const wait=event=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Playback timed out: '+event)),5000);video.addEventListener(event,()=>{clearTimeout(timer);resolve();},{once:true});video.addEventListener('error',()=>{clearTimeout(timer);reject(Error('Video decoding failed: '+video.error?.message));},{once:true});});
+      try{
+        const loaded=wait('loadeddata');video.src=url;document.body.append(video);await loaded;
+        if(video.videoWidth!==160 || !Number.isFinite(video.duration))throw Error('Invalid MP4 video metadata');
+        await video.play();const seeked=wait('seeked');video.currentTime=1;await seeked;
+        if(video.readyState<2)throw Error('Seeking did not produce a decoded video frame');
+      }finally{video.pause();video.remove();URL.revokeObjectURL(url);}
+    },[...fs.readFileSync(entry.file)]);
   }
   assert.equal(requests.get('/watch/0'),1,'worker recovery must not resolve the same task again');
   assert.equal(requests.get('/watch/3'),2,'a transient profile-page failure must retry automatically');

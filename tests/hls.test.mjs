@@ -4,6 +4,7 @@ import {HlsDownloader,removeHlsCache} from '../assets/js/hls-downloader.js';
 import {DirectDownloader} from '../assets/js/direct-downloader.js';
 import {parsePlaylist,encryptionIV} from '../assets/js/hls-playlist.js';
 import {resolveMedia} from '../assets/js/media-resolver.js';
+import {fragment,mediaPayload} from './fixtures/mp4.mjs';
 
 function storageFixture() {
   const files = new Map();
@@ -43,6 +44,65 @@ function fixtureFetcher(calls,text=playlist()) {
     return Promise.resolve(new Response(bodyFor(Number(url.match(/seg-(\d+)/)?.[1] || 0))));
   };
 }
+
+const tsPacket = marker => {const packet=new Uint8Array(188);packet[0]=0x47;packet[187]=marker;return packet;};
+function recordingMux(markers,onFlush=()=>{}) {
+  let listener,marker;
+  return {on(event,fn){if(event==='data')listener=fn;},push(data){marker=data.at(-1);},flush(){markers.push(marker);listener(fragment(marker));onFlush(marker);},dispose(){}};
+}
+
+test('MP4 remuxing starts before download finishes and preserves playlist order', {timeout:5000}, async()=>{
+  const storage=storageFixture(),markers=[],phases=[];let release,firstConverted,saved;
+  const held=new Promise(resolve=>{release=resolve;});
+  const converted=new Promise(resolve=>{firstConverted=resolve;});
+  const engine=new HlsDownloader({storage,maxConcurrent:3,
+    fetcher:async url=>url===source?new Response(playlist(3)):url.includes('seg-1')?held:new Response(tsPacket(url.includes('seg-0')?0:2)),
+    transmuxerFactory:()=>recordingMux(markers,()=>firstConverted()),onProgress:p=>phases.push(p.phase),
+    saveFile:async result=>{saved=result;},onError:error=>assert.fail(error)});
+  const run=engine.start(source,{...options,outputFormat:'mp4'});
+  try {
+    await converted;
+    assert.deepEqual(markers,[0],'the first segment must convert while a later request is still pending');
+    assert.equal(saved,undefined,'partial MP4 must never be offered for saving');
+    assert.equal(storage.files.get('test.ts.converted.mp4').length,0,'staged MP4 must remain uncommitted');
+  }finally {release(new Response(tsPacket(1)));await run;}
+  assert.deepEqual(markers,[0,1,2]);
+  assert.deepEqual(mediaPayload(storage.files.get('test.ts.converted.mp4')),[0,1,2]);
+  assert.equal(saved.format,'mp4');assert.equal(saved.bytesReceived,storage.files.get('test.ts.converted.mp4').length);
+  assert.ok(phases.includes('downloading-mp4'));
+  await new HlsDownloader({storage,fetcher:()=>assert.fail('completed cache must not be fetched'),transmuxerFactory:()=>assert.fail('completed MP4 must not be remuxed'),saveFile:async result=>{saved=result;},onError:error=>assert.fail(error)}).start(source,{...options,outputFormat:'mp4'});
+  assert.equal(saved.opfsFileName,'test.ts.converted.mp4');
+  const manifest=JSON.parse(new TextDecoder().decode(storage.files.get('test.ts.hls.json')));
+  manifest.converterVersion=1;storage.files.set('test.ts.hls.json',new TextEncoder().encode(JSON.stringify(manifest)));
+  let rebuilt=0;
+  await new HlsDownloader({storage,fetcher:()=>assert.fail('old conversions must rebuild from retained segments'),transmuxerFactory:()=>{rebuilt++;return recordingMux([]);},saveFile:async()=>{},onError:error=>assert.fail(error)}).start(source,{...options,outputFormat:'mp4'});
+  assert.equal(rebuilt,1,'old fragmented output must not be reused after the converter update');
+});
+
+test('pausing streaming MP4 retains segments and resume rebuilds a complete output',async()=>{
+  const storage=storageFixture(),markers=[],calls=[];let first;
+  const fetcher=async url=>{calls.push(url);return new Response(url===source?playlist(2):tsPacket(url.includes('seg-0')?0:1));};
+  first=new HlsDownloader({storage,maxConcurrent:1,fetcher,transmuxerFactory:()=>recordingMux(markers,()=>{first.pauseRequested=true;first.controller.abort();}),saveFile:async()=>assert.fail('paused conversion must not save'),onError:error=>assert.fail(error)});
+  await first.start(source,{...options,outputFormat:'mp4'});
+  assert.ok(first.completed.has(0));
+  assert.equal(storage.files.get('test.ts.converted.mp4').length,0);
+  await new HlsDownloader({storage,fetcher,transmuxerFactory:()=>recordingMux([]),saveFile:async()=>{},onError:error=>assert.fail(error)}).start(source,{...options,outputFormat:'mp4'});
+  assert.equal(calls.filter(url=>url.includes('seg-0')).length,1,'the committed source must not download again');
+  assert.deepEqual(mediaPayload(storage.files.get('test.ts.converted.mp4')),[0,1]);
+});
+
+test('an unsupported later segment aborts partial MP4 and saves the complete original',async()=>{
+  const storage=storageFixture(),supported=tsPacket(0),unsupported=tsPacket(1),updates=[];let saved;
+  unsupported[1]=0x40;unsupported[3]=0x10;unsupported[5]=2;unsupported[6]=0xb0;unsupported[7]=18;unsupported[15]=0xf0;unsupported[17]=0x24;
+  const engine=new HlsDownloader({storage,maxConcurrent:1,
+    fetcher:async url=>new Response(url===source?playlist(2):url.includes('seg-0')?supported:unsupported),
+    transmuxerFactory:()=>recordingMux([]),onProgress:p=>updates.push(p),saveFile:async output=>{saved=output;},onError:error=>assert.fail(error)});
+  await engine.start(source,{...options,outputFormat:'mp4'});
+  assert.equal(saved.format,'m3u8');assert.equal(saved.opfsFileName,'test.ts');
+  assert.deepEqual(storage.files.get('test.ts'),new Uint8Array([...supported,...unsupported]));
+  assert.equal(storage.files.get('test.ts.converted.mp4').length,0);
+  assert.ok(updates.some(update=>/original TS/.test(update.fallbackReason)));
+});
 
 test('native fetch receiver is preserved for direct downloads',async()=>{
   const storage=storageFixture();let saved=false,error;

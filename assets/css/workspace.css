@@ -280,3 +280,9 @@ html[data-surface="popup"] .profile-download-bar{padding-right:22px}
   .history-thumbnail{width:76px;height:48px;flex-basis:76px}.history-record{gap:10px}.history-record-actions{gap:4px}.history-file-details summary{font-size:9px}
   .settings-panel>.setting-card-row{gap:12px}.setting-desc{font-size:10px}.settings-panel .profile-quality-select{min-width:128px;font-size:10px}
 }
+/* Format choices stay next to the quality and download controls. */
+.download-format-options{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin:0 0 10px}
+.download-format-hint{flex:1 1 180px;margin:0;color:var(--text-muted);font-size:10.5px;line-height:16px}
+.profile-download-options{display:flex;align-items:center;gap:8px;min-width:0}
+.profile-download-options .profile-quality-select{max-width:135px}
+@media(max-width:420px){.profile-selection-toolbar{flex-wrap:wrap}.profile-download-options{justify-content:space-between;width:100%}}
