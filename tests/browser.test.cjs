@@ -54,6 +54,16 @@ const server = http.createServer((req,res) => {
     await page.waitForFunction(()=>document.querySelector('#queue-limit')?.value==='0');
     assert.equal(await page.evaluate(async()=>(await testStorage.get('download-settings'))['download-settings'].maxConcurrentTasks),0);
     await page.locator('[data-tab="settings"]').click();
+    for(const width of [480,900]){
+      await page.setViewportSize({width,height:850});
+      const layout=await page.locator('.setting-pending').evaluate(row=>{const label=row.querySelector('.setting-label-col').getBoundingClientRect(),input=row.querySelector('input').getBoundingClientRect();return {label:label.width,input:input.width,separated:label.right<=input.left,height:row.getBoundingClientRect().height};});
+      assert.ok(layout.label>=170 && layout.input<=100 && layout.separated && layout.height<150,'queue setting must fit without overlapping or squeezing its label');
+    }
+    await page.setViewportSize({width:1100,height:850});
+    assert.equal(await page.locator('#settings-pending-limit').inputValue(),'0');
+    await page.locator('#settings-pending-limit').fill('25');
+    await page.locator('#settings-pending-limit').blur();
+    await page.waitForFunction(async()=>(await testStorage.get('download-settings'))['download-settings'].maxPendingTasks===25);
     assert.equal(await page.locator('.concurrency-val').innerText(),'0');
     assert.equal(await page.locator('#btn-concurrency-minus').isDisabled(),true);
     await page.locator('#btn-concurrency-plus').click();

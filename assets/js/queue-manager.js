@@ -12,7 +12,7 @@ import {isMissavPage} from './missav-media.js';
 import {OffscreenDownload} from './offscreen-client.js';
 import {fetchBytes,networkError,transientError,retryDelay,errorData,restoreError} from './network.js';
 import {installWindowManager} from './window-manager.js';
-import {normalizeQueueLimit} from './queue-limits.js';
+import {normalizeQueueLimit,normalizePendingLimit} from './queue-limits.js';
 import {MP4_CONVERTER_VERSION} from './mp4-output.js';
 
 export function installQueueManager({queueStorage, historyStorage, settingsStorage, HlsDownloader = PersistentHlsDownloader, registerBlob, bindBlob, clearBlob, formatFilename, withSubdir}) {
@@ -27,11 +27,44 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
   let batchJob,batchCancelling=false;
   let scanPromise,clearingProfile=false;
   let selectionOperation = Promise.resolve();
+  let admissionOperation = Promise.resolve();
+  let roomRevision=0;
+  const roomWaiters=new Set();
+  function signalQueueChange(){roomRevision++;for(const wake of [...roomWaiters])wake();}
   const cancelledBatches = new Set();
+  const pausedBatches = new Set();
+  let batchControlOperation=Promise.resolve();
+  const controlBatch=fn=>{const next=batchControlOperation.then(fn);batchControlOperation=next.catch(()=>{});return next;};
   const taskById = async id => (await queueStorage.get()).tasks.find(t => t.id === id);
   const needsMp4Rebuild=task=>task.format==='m3u8' && task.outputFormat==='mp4' && task.outputExtension==='mp4' && task.outputConverterVersion!==MP4_CONVERTER_VERSION;
   const patch = (id, value) => queueStorage.updateTask(id, value);
   const notify = message => chrome.runtime.sendMessage(message).catch(() => {});
+  // Serialize the check and insertion so simultaneous requests cannot overfill the queue.
+  function admit(value,signal) {
+    const next=admissionOperation.then(async()=>{
+      signal?.throwIfAborted();
+      if(value.batchId && pausedBatches.has(value.batchId))return null;
+      const limit=normalizePendingLimit((await settingsStorage.get()).maxPendingTasks);
+      if(limit && (await queueStorage.get()).tasks.filter(task=>task.status==='queued').length>=limit) return null;
+      signal?.throwIfAborted();
+      if(value.batchId && pausedBatches.has(value.batchId))return null;
+      const id=await queueStorage.enqueue(value);
+      schedule();
+      return id;
+    });
+    admissionOperation=next.catch(()=>{});
+    return next;
+  }
+  function waitForQueueRoom(signal,revision) {
+    return new Promise((resolve,reject)=>{
+      signal.throwIfAborted();
+      const done=()=>{roomWaiters.delete(done);signal.removeEventListener('abort',abort);resolve();};
+      const abort=()=>{roomWaiters.delete(done);signal.removeEventListener('abort',abort);reject(signal.reason);};
+      roomWaiters.add(done);
+      signal.addEventListener('abort',abort,{once:true});
+      if(roomRevision!==revision)done();
+    });
+  }
   const remoteInstance=(task,entry)=>new OffscreenDownload({task:{...task,downloadSubdir:entry.subdir},ensureOffscreen,
     saveFile:options=>saveFile({...options,entry}),...callbacks(task,entry),
     onFailure:error=>failed(entry.task,entry,error).catch(console.error),
@@ -113,7 +146,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     }
   }
   const recordCompletion = (task,entry) => historyStorage.addRecord(entry?.savedFileName || task.savedFileName || task.fileName || 'video',task.url,task.pageUrl,{
-    taskId:task.id,title:task.title || task.fileName,creator:task.creator,quality:task.quality,
+    taskId:task.id,batchId:task.batchId,title:task.title || task.fileName,creator:task.creator,quality:task.quality,
     format:entry?.task?.outputExtension || task.outputExtension || task.format,thumbnail:task.thumbnail,thumbnails:task.thumbnails,
     bytes:entry?.task?.outputBytes || task.outputBytes || entry?.instance?.getBytesReceived?.() || task.fetchedBytes || task.cachedBytes,
     downloadId:entry?.saveId ?? task.chromeDownloadId
@@ -245,6 +278,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     } catch (error) { await failed(fresh,entry,error); }
   }
   function schedule(){
+    signalQueueChange();
     reschedule=true;
     if(!initialized)return Promise.resolve();
     if(schedulingPromise)return schedulingPromise;
@@ -271,7 +305,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
         }
         const tasks = (await queueStorage.get()).tasks;
         for (const task of tasks.filter(t => t.status === 'queued').sort((a,b) => a.createdAt-b.createdAt)) {
-          if (cancelledBatches.has(task.batchId)) continue;
+          if (cancelledBatches.has(task.batchId) || pausedBatches.has(task.batchId)) continue;
           if(task.nextRetryAt>Date.now())continue;
           const recovered = tasks.filter(t => t.status === 'downloading' && !active.has(t.id)).length;
           if (recovered + [...active.values()].filter(e => !e.paused && !e.finished).length >= limit) break;
@@ -336,6 +370,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
   }
   async function resume(id) {
     const task=await taskById(id);if(!task)throw Error('Task not found');
+    if(task.batchId && pausedBatches.has(task.batchId))throw Error('Resume the batch before resuming this download.');
     if(task.status==='downloading')return;
     await patch(id,{status:'queued',error:undefined,retryCount:0,nextRetryAt:undefined});
     schedule();
@@ -427,15 +462,17 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     } finally { if (rules.length) await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds:[ruleId]}).catch(() => {}); }
   }
   const fetchText = (url,headers,signal) => fetchResource(url,headers,false,signal);
-  async function batchProfile(message,job) {
+  async function batchProfile(message,job,previous) {
     const signal=job.controller.signal;
-    const fetchForBatch=(url,headers) => fetchText(url,headers,signal);
-    let batch = {id:job.id,profileKey:job.profileKey,profileName:message.profileName,status:'running',total:message.videos.length,processed:0,enqueued:0,skipped:0,failed:0,errors:[],currentTitle:''};
+    let batch = previous || {id:job.id,profileKey:job.profileKey,profileName:message.profileName,status:'running',total:message.videos.length,processed:0,enqueued:0,skipped:0,failed:0,errors:[],currentTitle:''};
+    job.batch=batch;
     try {
       const settings=await settingsStorage.get();
-      for (const video of message.videos) {
+      for (let index=batch.processed;index<message.videos.length;index++) {
+        const video=message.videos[index];
         signal.throwIfAborted();
-        batch.currentTitle = video.title;
+        while(pausedBatches.has(job.id)){const revision=roomRevision;await waitForQueueRoom(signal,revision);}
+        batch.currentTitle = video.title;batch.waitingForQueue=false;
         await chrome.storage.local.set({profileBatchState:batch});
         try {
           if (downloadedRecord((await historyStorage.get()).records || [],video.url,video.videoUrl)) {
@@ -447,11 +484,17 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
           const creator = safeFilePart(message.profileName || 'Creator');
           const title = safeFilePart(video.title);
           const page=new URL(video.url);if(!/^https?:$/.test(page.protocol))throw Error('Invalid video page URL');
-          await queueStorage.enqueue({url:'',quality:message.quality,outputFormat:message.outputFormat || settings.outputFormat || 'mp4',fileName:message.useChannelFolder ? `${creator}/${title}` : `${creator} - ${title}`,
+          const task={url:'',quality:message.quality,outputFormat:message.outputFormat || settings.outputFormat || 'mp4',fileName:message.useChannelFolder ? `${creator}/${title}` : `${creator} - ${title}`,
             title:video.title,creator:message.profileName,thumbnail:video.thumbnail,thumbnails:video.thumbnails,
-            batchId:job.id,batchProfileKey:job.profileKey,pageUrl:page.href,headers:mediaHeaders({},page.href)});
+            batchId:job.id,batchProfileKey:job.profileKey,pageUrl:page.href,headers:mediaHeaders({},page.href)};
+          while(true){
+            const revision=roomRevision;
+            if(await admit(task,signal))break;
+            if(!batch.waitingForQueue && !pausedBatches.has(job.id)){batch.waitingForQueue=true;await chrome.storage.local.set({profileBatchState:batch});}
+            await waitForQueueRoom(signal,revision);
+          }
+          batch.waitingForQueue=false;
           batch.enqueued++;
-          schedule();
         } catch (error) {
           if (signal.aborted) throw error;
           batch.failed++;
@@ -462,9 +505,10 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       batch.status = 'complete';
     } catch (error) { batch.status = signal.aborted ? 'cancelling' : 'error'; if (!signal.aborted) batch.error = error.message; }
     finally {
-      batchRunning = false;
       if (signal.aborted) batch.status='cancelling';
-      await chrome.storage.local.set({profileBatchState:batch});
+      batch.waitingForQueue=false;
+      await chrome.storage.local.set({profileBatchState:batch,profileBatchPlan:null});
+      batchRunning = false;
       notify({type:'profile-scan-keepalive',enabled:false,job:'batch'});
     }
   }
@@ -473,22 +517,60 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     try {
     const saved=(await chrome.storage.local.get('profileBatchState')).profileBatchState;
     const key=message.profileKey || (message.batchId===saved?.id ? saved.profileKey : batchJob?.profileKey || saved?.profileKey);
-    const matches=task => !!task.batchId && (task.batchId===message.batchId || (key && task.batchProfileKey===key));
-    const job=batchJob && (batchJob.id===message.batchId || batchJob.profileKey===key) ? batchJob : null;
+    const targetId=message.batchId || (saved?.profileKey===key?saved.id:undefined);
+    const matches=task => !!targetId && task.batchId===targetId;
+    const job=batchJob && batchJob.id===targetId ? batchJob : null;
     if (job) { cancelledBatches.add(job.id); job.controller.abort(); }
     // Fence scheduling/completion before waiting for the resolving request to stop.
     for (const task of (await queueStorage.get()).tasks.filter(matches)) {
       cancelledBatches.add(task.batchId);
       const entry=active.get(task.id); if(entry){entry.deleted=true;entry.controller?.abort();}
     }
-    if (saved && (saved.id===message.batchId || saved.profileKey===key)) await chrome.storage.local.set({profileBatchState:{...saved,status:'cancelling'}});
+    if (saved && saved.id===targetId) await chrome.storage.local.set({profileBatchState:{...saved,status:'cancelling'}});
     await job?.promise;
     let cancelled=0;
     for (const task of (await queueStorage.get()).tasks.filter(matches)) { await serial(task.id,() => remove(task.id)); cancelled++; }
     const current=(await chrome.storage.local.get('profileBatchState')).profileBatchState;
-    if (current && (current.id===message.batchId || current.profileKey===key)) await chrome.storage.local.set({profileBatchState:{...current,status:'cancelled',cancelled}});
+    if (current && current.id===targetId) await chrome.storage.local.set({profileBatchState:{...current,status:'cancelled',cancelled,batchPaused:false}});
+    pausedBatches.delete(targetId);
     return {cancelled};
     } finally {batchCancelling=false;}
+  }
+  async function batchAction(message,action){
+    const saved=(await chrome.storage.local.get('profileBatchState')).profileBatchState;
+    const id=message.batchId;
+    if(!id || saved?.id!==id || ['cancelled','cancelling'].includes(saved.status))throw Error('Batch is no longer available.');
+    const batch=batchJob?.id===id && batchJob.batch ? batchJob.batch : saved;
+    if(action==='pause'){
+      pausedBatches.add(id);batch.batchPaused=true;batch.waitingForQueue=false;
+      await chrome.storage.local.set({profileBatchState:batch});
+      await admissionOperation;
+      const errors=[];
+      for(const task of (await queueStorage.get()).tasks.filter(t=>t.batchId===id && ['queued','downloading'].includes(t.status))){
+        // Source resolution runs inside the task's serial operation. Interrupt it
+        // before joining that operation so a stalled request cannot block pause.
+        const entry=active.get(task.id);
+        if(entry && !entry.instance){entry.paused=true;entry.controller?.abort();}
+        try{await serial(task.id,async()=>{const current=await taskById(task.id);if(!current || !['queued','downloading'].includes(current.status))return;await patch(task.id,{batchPausedBy:id});try{await pause(task.id);}catch(error){await patch(task.id,{batchPausedBy:undefined});throw error;}});}catch(error){errors.push(error.message);}
+      }
+      await chrome.storage.local.set({profileBatchState:batch});
+      if(errors.length)throw Error('Some downloads could not be paused: '+errors[0]);
+    }else if(action==='resume'){
+      for(const task of (await queueStorage.get()).tasks.filter(t=>t.batchId===id && t.batchPausedBy===id)){
+        await serial(task.id,async()=>{const current=await taskById(task.id);if(current?.batchPausedBy!==id)return;await patch(task.id,{batchPausedBy:undefined,...(current.status==='paused'?{status:'queued',error:undefined}: {})});});
+      }
+      batch.batchPaused=false;
+      await chrome.storage.local.set({profileBatchState:batch});
+      pausedBatches.delete(id);signalQueueChange();schedule();
+    }else{
+      if(pausedBatches.has(id))throw Error('Resume the batch before retrying failed downloads.');
+      let retried=0;
+      for(const task of (await queueStorage.get()).tasks.filter(t=>t.batchId===id && t.status==='error')){
+        await serial(task.id,async()=>{if((await taskById(task.id))?.status==='error'){await resume(task.id);retried++;}});
+      }
+      return {retried};
+    }
+    return {};
   }
   async function scanProfile(url) {
     if (scanController) throw Error('A profile scan is already running');
@@ -551,13 +633,17 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       });
     } finally {clearingProfile=false;}
   }
-  function beginProfileBatch(message) {
-    if (batchRunning || batchCancelling) throw Error('A batch is already running');
+  async function beginProfileBatch(message) {
+    if (batchRunning || batchCancelling || pausedBatches.size) throw Error('Resume or cancel the current batch before starting another.');
     if (!Array.isArray(message.videos) || !message.videos.length) throw Error('Select at least one new video');
     batchRunning=true;
     batchJob={id:`batch-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,profileKey:profileKey(message.profileUrl,message.profileName),controller:new AbortController()};
-    batchJob.promise=batchProfile(message,batchJob).catch(console.error);
-    return {batchId:batchJob.id};
+    const initial={id:batchJob.id,profileKey:batchJob.profileKey,profileName:message.profileName,status:'running',total:message.videos.length,processed:0,enqueued:0,skipped:0,failed:0,errors:[],currentTitle:''};
+    const job=batchJob;
+    const persisted=chrome.storage.local.set({profileBatchPlan:{id:job.id,message},profileBatchState:initial});
+    job.promise=persisted.then(()=>batchProfile(message,job,initial)).catch(error=>{batchRunning=false;console.error(error);});
+    await persisted;
+    return {batchId:job.id};
   }
   async function batchSelectedProfile(message) {
     await selectionOperation;
@@ -615,8 +701,9 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
           if (!/^https?:$/.test(url.protocol)) throw Error('Invalid video URL');
           const format = message.format === 'hls' || message.format === 'm3u8' || /\.m3u8(?:[?#]|$)/i.test(url.href) ? 'm3u8' : message.format === 'webm' ? 'webm' : 'mp4';
           const settings=await settingsStorage.get();
-          const taskId = await queueStorage.enqueue({...message,url:url.href,format,outputFormat:message.outputFormat || settings.outputFormat || 'mp4'});
-          schedule(); return {id:taskId};
+          const taskId = await admit({...message,url:url.href,format,outputFormat:message.outputFormat || settings.outputFormat || 'mp4'});
+          if(!taskId) throw Error('Pending queue is full. Wait for a download to start or increase the queue limit in Settings.');
+          return {id:taskId};
         })(); break;
       case 'download-queue-pause': operation = serial(id,() => pause(id)); break;
       case 'download-queue-resume': operation = serial(id,() => resume(id)).then(()=>schedulingPromise || schedule()); break;
@@ -654,10 +741,13 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       case 'profile-scan-stop': scanController?.abort(); respond({success:true}); return false;
       case 'profile-results-clear': operation=clearProfileResults(); break;
       case 'profile-selection-update': operation=updateSelection(message); break;
-      case 'profile-batch-selected': operation=batchSelectedProfile(message); break;
+      case 'profile-batch-selected': operation=ready.then(()=>controlBatch(()=>batchSelectedProfile(message))); break;
       case 'profile-batch-start':
-        operation=Promise.resolve().then(() => beginProfileBatch(message)); break;
-      case 'profile-batch-cancel': operation=cancelProfileBatch(message); break;
+        operation=ready.then(()=>controlBatch(()=>beginProfileBatch(message))); break;
+      case 'profile-batch-cancel': operation=ready.then(()=>controlBatch(()=>cancelProfileBatch(message))); break;
+      case 'profile-batch-pause': operation=ready.then(()=>controlBatch(()=>batchAction(message,'pause')));break;
+      case 'profile-batch-resume': operation=ready.then(()=>controlBatch(()=>batchAction(message,'resume')));break;
+      case 'profile-batch-retry-failed': operation=ready.then(()=>controlBatch(()=>batchAction(message,'retry')));break;
       default: return false;
     }
     operation.then(result => respond({success:true,...result}),error => respond({success:false,error:error.message,detail:errorData(error)}));
@@ -681,9 +771,19 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
       else if (delta.paused) await patch(task.id,{status:delta.paused.current ? task.queueLimited?'queued':'paused' : 'downloading'});
     }
   });
-  settingsStorage.subscribe(() => schedule());
+  let previousPendingCount;
+  queueStorage.subscribe?.(()=>{
+    const tasks=queueStorage.getSnapshot?.()?.tasks;
+    if(!tasks)return;
+    const count=tasks.filter(task=>task.status==='queued').length;
+    if(previousPendingCount===undefined || count<previousPendingCount)signalQueueChange();
+    previousPendingCount=count;
+  });
+  settingsStorage.subscribe(() => {signalQueueChange();schedule();});
   chrome.alarms?.onAlarm.addListener(alarm=>{if(alarm.name==='mediaflow-queue-retry')schedule();});
   const ready = (async () => {
+    const persistedBatch=(await chrome.storage.local.get('profileBatchState')).profileBatchState;
+    if(persistedBatch?.batchPaused)pausedBatches.add(persistedBatch.id);
     let remoteRuns=[];
     if(useOffscreen && await chrome.offscreen.hasDocument?.()){
       const snapshot=await chrome.runtime.sendMessage({type:'mf-offscreen-command',command:'snapshot'});remoteRuns=snapshot?.runs || [];
@@ -698,6 +798,12 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
         const entry={kind:restored.format==='m3u8'?'m3u8':'mp4',phase:run.progress?.phase || 'downloading',task:restored,paused:false,subdir:restored.downloadSubdir || ''};
         entry.instance=remoteInstance(restored,entry);entry.instance.runId=run.runId;entry.instance.bytes=run.bytes;active.set(task.id,entry);
         await patch(task.id,{...run.task,...run.progress,status:'downloading'});
+        if(pausedBatches.has(restored.batchId)){
+          await patch(task.id,{batchPausedBy:restored.batchId});
+          if(entry.phase==='saving' && typeof task.chromeDownloadId!=='number')await entry.instance.pauseSoft();
+          await pause(task.id);
+          continue;
+        }
         if(run.state==='ready')entry.instance.handle({runId:run.runId,event:'ready',output:run.output});
         if(run.state==='error')await failed(restored,entry,restoreError(run.error));
         continue;
@@ -711,13 +817,21 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     }
     const saved = (await chrome.storage.local.get('profileScanState')).profileScanState;
     if (saved?.status === 'scanning' && !scanController) await chrome.storage.local.set({profileScanState:{...saved,status:'stopped',error:'Scan interrupted. Fetch Videos again to rescan all pages.'}});
-    const savedBatch = (await chrome.storage.local.get('profileBatchState')).profileBatchState;
+    const batchData = await chrome.storage.local.get(['profileBatchState','profileBatchPlan']);
+    const savedBatch = batchData.profileBatchState;
     if (savedBatch?.status==='cancelled' || savedBatch?.status==='cancelling') {
       cancelledBatches.add(savedBatch.id);
-      for(const task of (await queueStorage.get()).tasks.filter(task => task.batchId && (task.batchId===savedBatch.id || task.batchProfileKey===savedBatch.profileKey)))await remove(task.id);
-      await chrome.storage.local.set({profileBatchState:{...savedBatch,status:'cancelled'}});
+      for(const task of (await queueStorage.get()).tasks.filter(task => task.batchId===savedBatch.id))await remove(task.id);
+      await chrome.storage.local.set({profileBatchState:{...savedBatch,status:'cancelled'},profileBatchPlan:null});
     }
-    if (savedBatch?.status === 'running' && !batchRunning) await chrome.storage.local.set({profileBatchState:{...savedBatch,status:'error',error:'Batch interrupted. Select remaining videos and start again.'}});
+    if (savedBatch?.status === 'running' && !batchRunning) {
+      if(batchData.profileBatchPlan?.id===savedBatch.id && Array.isArray(batchData.profileBatchPlan.message?.videos)){
+        batchRunning=true;
+        batchJob={id:savedBatch.id,profileKey:savedBatch.profileKey,controller:new AbortController()};
+        batchJob.promise=batchProfile(batchData.profileBatchPlan.message,batchJob,savedBatch).catch(console.error);
+      }else await chrome.storage.local.set({profileBatchState:{...savedBatch,status:'error',error:'Batch interrupted. Select remaining videos and start again.'}});
+    }
+    if(savedBatch?.batchPaused && !['cancelled','cancelling'].includes(savedBatch.status))await batchAction({batchId:savedBatch.id},'pause');
     for(const run of remoteRuns)if(!await taskById(run.taskId))await notify({type:'mf-offscreen-command',command:'drop',taskId:run.taskId});
     initialized = true;
     await schedule();

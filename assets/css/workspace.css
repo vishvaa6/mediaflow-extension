@@ -84,7 +84,7 @@ p,.setting-desc,.empty-state-text{ text-wrap:pretty }
 .profile-source-help{margin:7px 0 0;font-size:10.5px;line-height:15px;color:var(--text-dim)}
 .profile-scan-error{font-size:11px;line-height:1.5;margin:7px 0 0;color:var(--accent-rose);overflow-wrap:anywhere}
 .profile-notice{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0;min-height:20px;font-size:10.5px;color:var(--text-muted)}
-.profile-notice [data-role="batch-progress"]{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.profile-batch-panel{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}.profile-batch-panel .profile-notice{flex:1 1 240px;min-width:0}.profile-notice [data-role="batch-progress"]{min-width:0;overflow-wrap:anywhere}.profile-batch-actions{display:flex;flex-wrap:wrap;gap:6px}.profile-batch-actions button{font-size:10px}
 .profile-notice.notice-error{color:var(--accent-rose)}
 .profile-selection-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px;flex-shrink:0}
 .profile-selection-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
@@ -262,6 +262,7 @@ html[data-surface="popup"] .profile-download-bar{padding-right:22px}
 .setting-desc{font-size:10.5px;line-height:17px;max-width:380px}
 .settings-panel .profile-quality-select{height:30px;min-width:142px;font-size:11px;flex:none}
 .setting-destination .modern-input{width:200px;max-width:45%;margin:0;height:32px;font-size:11px}
+.setting-pending .modern-input{width:100px;max-width:35%;flex:none;margin:0;height:32px;font-size:11px}
 .concurrency-stepper{height:32px;padding:0;background:var(--bg-main);border:1px solid var(--border-subtle);border-radius:7px;gap:0;overflow:hidden;flex:none}
 .btn-stepper{width:30px;height:30px;font-size:16px;background:transparent}
 .concurrency-val{min-width:36px;font-size:12px;font-weight:500}

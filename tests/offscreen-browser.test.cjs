@@ -103,6 +103,14 @@ async function createBackground(){
   await until(()=>new Set([...held].map(job=>job.id)).size===2,'two active transfers');
   assert.equal(values.downloadQueueState.tasks.length,4);assert.equal(values.downloadQueueState.tasks.filter(task=>task.status==='queued').length,2);
   assert.equal(requests.has('/watch/2'),false,'queued pages must not resolve early');
+  assert.equal((await dispatch(background,{type:'profile-batch-pause',batchId:result.batchId},{id:'fixture'})).success,true);
+  await until(()=>values.downloadQueueState.tasks.every(task=>task.status==='paused'),'batch workers paused');
+  await background.close();await createBackground();
+  assert.equal(values.profileBatchState.batchPaused,true);
+  assert.ok(values.downloadQueueState.tasks.every(task=>task.status==='paused'));
+  assert.equal((await background.evaluate(()=>chrome.runtime.sendMessage({type:'mf-offscreen-command',command:'snapshot'}))).runs.length,0);
+  assert.equal((await dispatch(background,{type:'profile-batch-resume',batchId:result.batchId},{id:'fixture'})).success,true);
+  await until(()=>values.downloadQueueState.tasks.filter(task=>task.status==='downloading').length===2,'batch resumes two workers');
   await background.evaluate(async()=>{await (await import('/assets/js/storage.js')).settingsStorage.setMaxConcurrentTasks(0);await manager.schedule();});
   await until(()=>values.downloadQueueState.tasks.every(task=>task.status==='queued'),'zero holds every transfer');
   const heldRuns=await background.evaluate(()=>chrome.runtime.sendMessage({type:'mf-offscreen-command',command:'snapshot'}));

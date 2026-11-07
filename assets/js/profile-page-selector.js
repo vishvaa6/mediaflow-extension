@@ -2,6 +2,7 @@ import {parseProfileDocument,profileVideoElements} from './profile-scanner.js';
 import {profileKey,videoKey,downloadedRecord} from './video-details.js';
 import {selectionView,rangeHint} from './profile-selection.js';
 import {icon} from './icons.js';
+import {batchProgress} from './batch-progress.js';
 
 // Isolated-world UI: no page scripts run and no page global is trusted.
 export async function installProfilePageSelector() {
@@ -21,7 +22,7 @@ export async function installProfilePageSelector() {
     .toolbar-brand>span{display:flex;flex-direction:column}.toolbar-brand strong{font:600 12px/17px MediaFlowMontserrat,MediaFlowPoppins,sans-serif}.toolbar-brand small{font-size:9px;color:#94a3b8;line-height:13px}
     button,select{font:inherit;color:inherit;background:#172033;border:1px solid #354158;border-radius:6px;padding:4px 8px;cursor:pointer;min-height:28px}
     button:hover{background:#263149}button:focus-visible,select:focus-visible{outline:2px solid #a5b4fc;outline-offset:2px}button:disabled{opacity:.5;cursor:default}
-    .toolbar-status{padding:9px 0 8px}.toolbar-status p{margin:0;font-size:11px;line-height:17px}.toolbar-status small{display:block;color:#94a3b8;font-size:10px;margin-top:3px;font-variant-numeric:tabular-nums}
+    .toolbar-status{padding:9px 0 8px}.toolbar-status p{margin:0;font-size:11px;line-height:17px}.toolbar-status small{display:block;color:#94a3b8;font-size:10px;margin-top:3px;font-variant-numeric:tabular-nums}.batch-actions{margin-top:6px}.batch-actions button{font-size:10px}
     .row{display:flex;flex-wrap:wrap;gap:6px}.toolbar-selection{padding-bottom:10px}.toolbar-selection button{font-size:10px;background:transparent}
     .toolbar-download{border-top:1px solid #2b3548;padding-top:10px;align-items:center;justify-content:space-between}
     .quality-label{display:flex;align-items:center;gap:7px;font-size:10px;color:#94a3b8}.quality-label select{font-size:10px;max-width:130px}
@@ -31,7 +32,7 @@ export async function installProfilePageSelector() {
     #close{display:grid;place-items:center;width:26px;height:26px;min-height:26px;padding:4px;background:transparent}
     :host([hidden]),[hidden]{display:none!important}
   </style><section aria-label="MediaFlow batch video selection"><header><span class="toolbar-brand">${icon('list-video')}<span><strong>MediaFlow</strong><small>Profile selection</small></span></span><button id="close" aria-label="Minimize video selection" aria-expanded="true"></button></header>
-    <div id="body"><div class="toolbar-status"><p id="hint" role="status"></p><small id="count"></small></div><div class="row toolbar-selection"><button id="range">Select range</button><button id="new">Select new</button><button id="clear">Clear</button></div>
+    <div id="body"><div class="toolbar-status"><p id="hint" role="status"></p><small id="count"></small><small id="batch-status" role="status" hidden></small><div class="row batch-actions"><button id="batch-pause" hidden>Pause batch</button><button id="batch-retry" hidden>Retry failed</button></div></div><div class="row toolbar-selection"><button id="range">Select range</button><button id="new">Select new</button><button id="clear">Clear</button></div>
     <div class="row toolbar-download"><label class="quality-label">Quality<select id="quality" aria-label="Download quality"><option value="240">240p</option><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="best" selected>Best available</option></select></label><button id="download" class="primary">Batch download</button><button id="cancel" hidden>Cancel batch & downloads</button></div><p id="error" role="alert" hidden></p></div></section>`;
   const style=document.createElement('style');style.id='mediaflow-selection-style';
   style.textContent=`.mediaflow-pick-card{position:relative!important}.mediaflow-pick-selected{outline:3px solid #818cf8!important;outline-offset:2px!important}.mediaflow-pick-tick{all:initial!important;box-sizing:border-box!important;position:absolute!important;top:8px!important;left:8px!important;z-index:1000!important;background:#172033!important;color:#fff!important;border:2px solid #a5b4fc!important;border-radius:7px!important;padding:5px 8px!important;font:700 13px/1.3 system-ui,sans-serif!important;cursor:pointer!important;box-shadow:0 2px 8px #0008!important}.mediaflow-pick-tick[aria-checked=true]{background:#252e4b!important;border-color:#a5b4fc!important}.mediaflow-pick-tick:focus-visible{outline:3px solid #a5b4fc!important}.mediaflow-pick-tick:disabled{cursor:default!important}`;
@@ -99,8 +100,13 @@ export async function installProfilePageSelector() {
     for(const id of ['range','new','clear'])shadow.getElementById(id).disabled=!!pending;
     shadow.getElementById('range').setAttribute('aria-pressed',String(selection?.mode==='range' && !selection.end));
     const batch=saved.profileBatchState,batchHere=batch?.profileKey===key;
-    const running=batch && ['running','cancelling'].includes(batch.status);
-    const batchTasks=(saved.downloadQueueState?.tasks || []).filter(task=>task.batchId && task.batchProfileKey===key).length;
+    const running=batch && (['running','cancelling'].includes(batch.status) || !!batch.batchPaused);
+    const tasks=saved.downloadQueueState?.tasks || [],batchTasks=batchHere?tasks.filter(task=>task.batchId===batch.id).length:0;
+    const summary=batchHere?batchProgress(batch,tasks,history):null;
+    const batchStatus=shadow.getElementById('batch-status');batchStatus.hidden=!summary;if(summary)text('batch-status',summary.text);
+    const controllable=batchHere && !['cancelled','cancelling'].includes(batch.status);
+    const pauseButton=shadow.getElementById('batch-pause');pauseButton.hidden=!controllable || !(batch.batchPaused || summary?.counts.remaining || summary?.counts.waiting || summary?.counts.active);pauseButton.disabled=!!pending;text('batch-pause',batch?.batchPaused?'Resume batch':'Pause batch');
+    const retryButton=shadow.getElementById('batch-retry');retryButton.hidden=!controllable || !summary?.counts.failed;retryButton.disabled=!!pending || !!batch?.batchPaused;
     shadow.getElementById('download').disabled=!!pending || !view.complete || !view.videos.length || !sameScan || scan.status!=='complete' || running;
     text('download',`Batch download (${view.videos.length})`);
     shadow.getElementById('cancel').hidden=!batchTasks && !(batchHere && running);
@@ -118,6 +124,11 @@ export async function installProfilePageSelector() {
   shadow.getElementById('cancel').onclick=async()=>{
     pending++;refresh();
     try{await send({type:'profile-batch-cancel',profileKey:profileKey(location.href),batchId:saved.profileBatchState?.id});}
+    catch(e){error(e.message);}finally{pending--;refresh();}
+  };
+  for(const [id,action] of [['batch-pause',()=>saved.profileBatchState?.batchPaused?'resume':'pause'],['batch-retry',()=> 'retry-failed']])shadow.getElementById(id).onclick=async()=>{
+    pending++;refresh();error('');
+    try{await send({type:'profile-batch-'+action(),batchId:saved.profileBatchState?.id});}
     catch(e){error(e.message);}finally{pending--;refresh();}
   };
   document.addEventListener('click',event=>{

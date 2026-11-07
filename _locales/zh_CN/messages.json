@@ -345,7 +345,7 @@
   },
   "settingsMaxConcurrent": {
     "description": "Setting label for max concurrent tasks",
-    "message": "Queue Concurrency Limit"
+    "message": "Download limit"
   },
   "settingsMaxConcurrentHint": {
     "description": "Hint for max concurrent tasks",

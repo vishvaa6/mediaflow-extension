@@ -1,14 +1,26 @@
 # MediaFlow extension
 
-This folder is the runnable, unpacked browser extension. There is no build step.
+MediaFlow is a browser extension for detecting and downloading supported videos, managing creator batches, and resuming interrupted downloads. The repository root is the runnable, unpacked extension; no build step is required for the extension.
 
 ## Install v1.3.0
 
 Download the extension ZIP from [GitHub Releases](https://github.com/vishvaa6/mediaflow-extension/releases), extract it into a permanent folder, then enable Developer mode on `chrome://extensions` (Chrome) or `brave://extensions` (Brave). Click **Load unpacked** and select the folder containing `manifest.json`.
 
+To use the current source instead of a release, clone this repository, open the browser's Extensions page, enable Developer mode and choose **Load unpacked**. Select the repository root containing `manifest.json`. The checked-out branch may contain changes that are not yet in a published release.
+
 To create the release ZIP and checksum locally, run `python scripts/package_release.py`. The browser-ready package is written to `dist/`; tests and generated project maps are excluded.
 
 After changing the files, reload MediaFlow on the browser's Extensions page, then refresh the creator/video tab. Existing queue and history storage is preserved.
+
+## Windows desktop project
+
+The `desktop/` folder contains a Windows x64 WinUI application that hosts a browser and the bundled extension workspace in WebView2. On Windows, with a compatible .NET SDK and WebView2 runtime installed, build it from the repository root with:
+
+```powershell
+dotnet build desktop/MediaFlow.Desktop.csproj -c Release
+```
+
+The first build restores the Windows App SDK and Windows SDK build tools from NuGet. The desktop project is separate from the browser extension ZIP.
 
 ## Attached popup and MP4 output
 
@@ -18,7 +30,9 @@ After changing the files, reload MediaFlow on the browser's Extensions page, the
 - **Downloads** shows a compact source preview and quality choices beside the queue from 640px wide, so transfer status stays in view. Narrow popups stack these panels. Queue rows keep pause, resume, retry, error details and progress together.
 - **Settings** groups Download behavior, Files and folders, and Display. Native switches support keyboard use and changes save automatically. **History** has a search toolbar, concise saved-file rows, file/source actions and expandable file details. The website's MediaFlow selection toolbar uses the same compact controls and grouped download actions.
 - **Download format** in Settings defaults to **MP4 preferred**. Native MP4 is preferred at the requested quality. Compatible H.264/AAC TS-based HLS and native fragmented HLS are finalized as conventional MP4 files with sample sizes, decode/composition timing, keyframe seek indexes and complete track durations. Encoded samples stream to disk without re-encoding. Unsupported TS/WebM conversion saves the original format with an explanation. An MP4 stream that cannot be finalized safely reports an error and retains its segments. **Original format** skips conversion. Retry rebuilds older converted output from retained segments; completed files downloaded before this fix need to be downloaded again.
-- Profile selections enter the queue before resolving their video pages. Resolution, transfer, conversion and final saving share the **Queue limit** (0-12, default 6), available beside the Downloads queue and in Settings. **0 holds all downloads**. Lowering the limit suspends excess work, terminates its transfer workers and retains committed progress. Raising the limit resumes held tasks in queue order; manually paused tasks stay paused. Use a lower value to reduce RAM use. Repeating a creator batch skips its pending downloads.
+- Profile selections enter the queue before resolving their video pages. Resolution, transfer, conversion and final saving share the **Download limit** (0-12, default 6), available beside the Downloads queue and in Settings. **0 holds all downloads**. Lowering the limit suspends excess work, terminates its transfer workers and retains committed progress. Raising the limit resumes held tasks in queue order; manually paused tasks stay paused. Use a lower value to reduce RAM use. Repeating a creator batch skips its pending downloads.
+- **Queue limit** in Settings caps new waiting downloads separately from simultaneous downloads. The default, 0, is unlimited. A profile batch waits for space and resumes after a background restart; a single download reports when the queue is full. Existing tasks and downloads returned to the queue are kept even if they exceed a newly lowered limit.
+- Profile batch controls show not-yet-added, waiting, active, paused, completed and failed counts in the Library and website toolbar. **Pause batch** stops additions and pauses that batch's downloads; **Resume batch** leaves individually paused tasks alone. A paused batch stays paused across restarts and must be resumed or cancelled before another batch starts. **Retry failed** retries only its failed queue tasks using their retained cache. Completed counts use the batch's download-history records.
 - Transfers and conversion run in offscreen-owned workers, independently of the visible window and background service-worker lifetime. Queue recovery adopts existing workers. HLS segment checkpoints and direct partial files remain available for retry; interrupted conversion can restart from the retained source segments.
 - The initial response and each period of inactivity have a 60-second timeout; a response that continues delivering data can take longer. Transient network/timeout/429/5xx failures get up to three queued retries with backoff and bounded Retry-After delays. Waiting retries release capacity. Pausing/cancelling stops the request and retries. Expired media links are renewed without changing the checkpoint identity or requested quality/format.
 - **Downloaded** and **Not downloaded** badges appear on recognized website cards/players and extension views. They follow local completed-download history and supported URL aliases, update after navigation/history changes, and remain separate from selection. A task is marked downloaded only after the browser finishes saving it. Clearing history resets its badge; this does not check whether files were manually moved or deleted.
@@ -48,7 +62,7 @@ The v1.3.0 interface redesign follows the full-workspace audit and implementatio
 - Thumbnails resolve relative and lazy image URLs, try alternate sources, then retry through the background fetcher. Failed images show a placeholder.
 - Queue updates and selection changes preserve the profile grid. Large profiles show 60 videos per view while scanning all linked creator pages.
 - Batch resolution expands MP4 metadata endpoints and HLS variants before choosing quality. Resolution failures appear on their individual queued tasks with Retry controls; enqueue failures are counted in the batch summary.
-- **Cancel batch & downloads** in Profile Videos aborts the resolving request and cancels that creator's queued, paused, active, and final-save batch tasks. Single-video downloads and other creators' batches remain in place. Cancellation also catches enqueues already in progress.
+- **Cancel batch & downloads** in Profile Videos aborts the resolving request and cancels the current batch's queued, paused, active, and final-save tasks. Single-video downloads and other batches remain in place. Cancellation also catches enqueues already in progress.
 - Detected qualities are sorted by resolution from lowest to highest across formats. Single-video previews use the page's video poster, social metadata, or structured video metadata.
 - The History tab retains completed downloads with titles, creator, completion date, quality/format, size, source page, thumbnail URL, and browser download ID. It supports search, file/source actions, and removal. Old history records remain readable. Video-page identities drive **Already downloaded** labels even when stream signatures change.
 - **Show thumbnails** in Settings persists across sessions and controls previews in detection, profiles, and history.
@@ -58,7 +72,7 @@ The v1.3.0 interface redesign follows the full-workspace audit and implementatio
 
 ## X / Twitter videos
 
-On the `gpt-1` branch, MediaFlow automatically detects video and animated-GIF media visible in the viewport on `x.com` and `twitter.com`, including timelines.
+MediaFlow automatically detects video and animated-GIF media visible in the viewport on `x.com` and `twitter.com`, including timelines.
 
 1. Reload MediaFlow on the browser's Extensions page, then refresh the X tab so the new page observer is installed.
 2. Scroll a video into view on a timeline or open an individual post. MediaFlow updates automatically as visible players change; playback is not required when the page has already loaded its media variants.
@@ -73,7 +87,7 @@ The X regression and browser checks use synthetic API responses, including fetch
 
 ## MissAV catalogue and player detection
 
-The `gpt-1` branch supports the catalogue at `https://missav.ws/dm265/en`, individual video pages, and the existing MissAV domain aliases. Reload the extension and refresh an open MissAV tab after updating.
+MediaFlow supports the MissAV catalogue, individual video pages, and the existing MissAV domain aliases. Reload the extension and refresh an open MissAV tab after updating.
 
 - Scroll catalogue thumbnails into view. MediaFlow resolves their full video pages automatically and groups each video's available HLS qualities in the popup. Preview/trailer MP4 clips are excluded.
 - On a video page, the visible main player is resolved from its page configuration. Packed source strings are decoded as data; page scripts are never evaluated by the extension. Known sources remain available if the master playlist cannot be expanded.
@@ -87,6 +101,8 @@ The catalogue markup and current packed source format were inspected on the live
 ## Verification
 
 Run `npm test` for the core regression suite and the bundled background startup check.
+
+Run `npm run test:media` for MP4 playback, decoding and seek checks. This requires `ffmpeg` and `ffprobe` on PATH.
 
 Run `npm run test:browser` for the Chrome popup/DOM, webpage range selection, and native worker tests. The selection test clicks endpoints across creator pages, reloads the page, checks popup synchronization and dynamic cards, and verifies that the real background coordinator batches only the selected new videos. The worker tests close and reopen Chrome with the same browser profile, verify pause/close/reopen/resume with expired HTTP 472 links, assert that completed HLS segments are never requested again, and check direct resume output. The browser tests use the Codex bundled Playwright package; set `CODEX_NODE_MODULES` and `CHROME_PATH` to use another local installation. Screenshots are written to `test-results/`. The offscreen media integration test also requires `ffmpeg` and `ffprobe` on PATH; these are test tools only. It verifies deferred source resolution, the task limit, a background restart, automatic 503 retry, expired HLS renewal across worker replacements, MP4 video/audio/duration and discontinuities, playable TS/WebM fallback, and saving again from cache. Run it alone with `npm run test:offscreen`.
 

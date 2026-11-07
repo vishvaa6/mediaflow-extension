@@ -6,7 +6,8 @@ import {isXPage} from '../../../assets/js/x-media.js';
 import {isMissavPage} from '../../../assets/js/missav-media.js';
 import {icon} from '../../../assets/js/icons.js';
 import {createPopupSurface} from '../../../assets/js/popup-surface.js';
-import {normalizeQueueLimit} from '../../../assets/js/queue-limits.js';
+import {normalizeQueueLimit,normalizePendingLimit} from '../../../assets/js/queue-limits.js';
+import {batchProgress} from '../../../assets/js/batch-progress.js';
 const popupSurface=createPopupSurface();
 const isManagedPage=value=>isXPage(value) || isMissavPage(value);
 import {
@@ -62,7 +63,7 @@ function t(key, substitutions) {
     profileDownloadSelected: "Batch Download ($1)",
     profileNoVideosFound: "No profile videos detected yet. Navigate to a creator profile page or paste the URL above.",
     profileBatchSuccess: "Enqueued $1 profile videos!",
-    settingsMaxConcurrent: "Queue Concurrency Limit",
+    settingsMaxConcurrent: "Download limit",
     settingsMaxConcurrentHint: "Use 0-12 simultaneous downloads. 0 holds the queue. Lower limits use less RAM.",
     toastDownloadComplete: "Download completed: $1",
     toastDownloadFailed: "Download failed: $1",
@@ -147,11 +148,12 @@ const state = {
   hasSiteDetection:false,
   videoThumbnail:'',videoThumbnails:[],showThumbnails:true,
   historyQuery:'',historyPage:0,
-  profileBatchId:'',profileBatchKey:'',profileBatchStatus:'',isCancellingBatch:false,
+  profileBatchId:'',profileBatchKey:'',profileBatchStatus:'',profileBatch:null,batchControlPending:false,isCancellingBatch:false,
   customFilename: '',
   downloadSubdir: '',
   useChannelFolder: true,
   maxConcurrentTasks: 6,
+  maxPendingTasks: 0,
   outputFormat:'mp4',profileSourceOpen:false,profileListScroll:0,profileSearchQuery:'',viewScroll:{},
   tasks: [],
   history: [],
@@ -367,7 +369,7 @@ function updateDownloadedLabels() {
   document.querySelectorAll('[data-downloaded-page]').forEach(label => {const downloaded=!!downloadedRecord(state.history,label.dataset.downloadedPage,label.dataset.downloadedStream);label.hidden=false;label.classList.toggle('already-downloaded',downloaded);label.classList.toggle('not-downloaded',!downloaded);label.innerHTML=icon(downloaded?'check-check':'circle')+(downloaded?'Downloaded':'Not downloaded');});
 }
 function currentBatchProfileKey(){return state.profileUrl?profileKey(state.profileUrl,state.profileName):state.profileBatchKey;}
-function profileBatchTasks(){const key=currentBatchProfileKey();return state.tasks.filter(task => task.batchId && (task.batchProfileKey===key || (state.profileBatchKey===key && task.batchId===state.profileBatchId)));}
+function profileBatchTasks(){return state.profileBatchKey===currentBatchProfileKey()?state.tasks.filter(task => task.batchId===state.profileBatchId):[];}
 function profileSelectionNote(){
   const query=state.profileSearchQuery.trim().toLocaleLowerCase();
   const hidden=query?state.profileVideos.filter(video=>state.selectedIds.has(video.id) && !String(video.title || '').toLocaleLowerCase().includes(query)).length:0;
@@ -378,12 +380,19 @@ function updateProfileFooterNote(){
 }
 function updateBatchControls(){
   updateProfileFooterNote();
+  const batch=state.profileBatch,summary=batchProgress(batch,state.tasks,state.history);
+  if(summary){state.batchProgress=summary.text;const progress=document.querySelector('[data-role="batch-progress"]');if(progress){progress.textContent=summary.text;progress.title=summary.text;}}
+  const here=batch?.profileKey===currentBatchProfileKey(),controllable=here && !['cancelled','cancelling'].includes(batch.status);
+  const pauseButton=document.querySelector('#btn-pause-profile-batch');
+  if(pauseButton){pauseButton.hidden=!controllable || !(batch.batchPaused || summary?.counts.remaining || summary?.counts.waiting || summary?.counts.active);pauseButton.disabled=state.batchControlPending;pauseButton.textContent=batch.batchPaused?'Resume batch':'Pause batch';}
+  const retryButton=document.querySelector('#btn-retry-profile-batch');
+  if(retryButton){retryButton.hidden=!controllable || !summary?.counts.failed;retryButton.disabled=state.batchControlPending || !!batch.batchPaused;}
   const button=document.querySelector('#btn-cancel-profile-batch');
   if(!button)return;
   const count=profileBatchTasks().length;
   const running=state.isBatchEnqueuing && state.profileBatchKey===currentBatchProfileKey();
   button.hidden=!(count || running || state.isCancellingBatch);
-  button.disabled=state.isCancellingBatch;
+  button.disabled=state.isCancellingBatch || state.batchControlPending;
   button.textContent=state.isCancellingBatch?'Cancelling…':`Cancel batch${count ? ' ('+count+')' : ''}`;
 }
 
@@ -393,12 +402,10 @@ function applyProfileBatch(batch) {
   state.profileBatchId=batch.id || '';
   state.profileBatchKey=batch.profileKey || '';
   state.profileBatchStatus=batch.status;
+  state.profileBatch=batch;
   state.isCancellingBatch=batch.status==='cancelling';
-  state.isBatchEnqueuing = batch.status === 'running' || batch.status==='cancelling';
-  state.batchProgress = batch.status === 'running'
-    ? 'Queueing ' + Math.min(batch.processed+1,batch.total) + ' / ' + batch.total + ': ' + (batch.currentTitle || '')
-    : batch.status==='cancelling'?'Cancelling batch and its downloads…':batch.status==='cancelled'?'Batch cancelled · '+(batch.cancelled || 0)+' pending downloads removed'
-    : batch.enqueued + ' queued' + (batch.skipped ? ' · '+batch.skipped+' already downloaded, skipped' : '') + ' · ' + batch.failed + ' failed' + (batch.error ? ' · ' + batch.error : '');
+  state.isBatchEnqueuing = batch.status === 'running' || batch.status==='cancelling' || !!batch.batchPaused;
+  state.batchProgress = batchProgress(batch,state.tasks,state.history)?.text || '';
   if (wasRunning && !state.isBatchEnqueuing) showToast(state.batchProgress,batch.failed || batch.error ? 'warning' : 'success');
   else if (state.activeTab === 'profile') {
     const progress = document.querySelector('[data-role="batch-progress"]');
@@ -580,7 +587,7 @@ function outputFormatControl(id,label='Save as') {
   return `<label class="profile-quality-label output-format-control" for="${id}"><span>${label}</span><select id="${id}" class="profile-quality-select" data-output-format aria-label="${label}" title="Fast MP4 keeps video quality and converts compatible HLS during download. Unsupported codecs keep their original format."><option value="mp4" ${state.outputFormat==='mp4'?'selected':''}>MP4 (fast)</option><option value="source" ${state.outputFormat==='source'?'selected':''}>Original format</option></select></label>`;
 }
 function queueLimitControl() {
-  return `<label class="profile-quality-label" for="queue-limit"><span>Queue limit</span><select id="queue-limit" class="profile-quality-select" data-queue-limit aria-label="Queue limit" title="Simultaneous downloads. 0 holds the queue; lower limits use less RAM.">${Array.from({length:13},(_,n)=>`<option value="${n}" ${state.maxConcurrentTasks===n?'selected':''}>${n===0?'0 — Hold':n}</option>`).join('')}</select></label>`;
+  return `<label class="profile-quality-label" for="queue-limit"><span>Download limit</span><select id="queue-limit" class="profile-quality-select" data-queue-limit aria-label="Download limit" title="Simultaneous downloads. 0 holds the queue; lower limits use less RAM.">${Array.from({length:13},(_,n)=>`<option value="${n}" ${state.maxConcurrentTasks===n?'selected':''}>${n===0?'0 — Hold':n}</option>`).join('')}</select></label>`;
 }
 function renderVideoQueueTab() {
   const downloadingCount = state.tasks.filter(t => t.status === 'downloading').length;
@@ -755,7 +762,7 @@ function renderProfileTab() {
       </div>
     </details>
     ${state.isScanningProfile?'<div class="profile-notice" role="status"><span>Loading videos from linked pages…</span><button class="btn-text-sm" id="btn-stop-profile-scan">Stop scan</button></div>':''}
-    ${state.batchProgress?`<div class="profile-notice ${state.profileBatchStatus==='error'?'notice-error':''}" role="status"><span data-role="batch-progress" title="${escapeHtml(state.batchProgress)}">${escapeHtml(state.batchProgress)}</span></div>`:''}
+    ${state.batchProgress?`<div class="profile-batch-panel ${state.profileBatchStatus==='error'?'notice-error':''}"><div class="profile-notice" role="status"><span data-role="batch-progress" title="${escapeHtml(state.batchProgress)}">${escapeHtml(state.batchProgress)}</span></div><div class="profile-batch-actions"><button class="btn-pill-action" id="btn-pause-profile-batch" hidden>Pause batch</button><button class="btn-pill-action" id="btn-retry-profile-batch" hidden>Retry failed</button></div></div>`:''}
     ${totalCount?`
       <div class="profile-selection-toolbar" aria-label="Video selection tools">
         <div class="profile-selection-actions"><button class="btn-pill-action" id="btn-profile-select-all" ${!newCount || state.isBatchEnqueuing?'disabled':''}>Select new</button><button class="btn-pill-action" id="btn-profile-range" aria-pressed="false">Select range</button><button class="btn-pill-action" id="btn-profile-clear-selection">Clear</button></div>
@@ -810,6 +817,7 @@ function renderSettingsTab() {
         <div class="settings-panel">
           <div class="setting-card-row"><div class="setting-label-col"><label class="setting-title" for="output-format-select">Download format</label><span class="setting-desc">Prefer MP4. Other streams keep their playable original format.</span></div><select id="output-format-select" class="profile-quality-select" aria-label="Download format"><option value="mp4" ${state.outputFormat==='mp4'?'selected':''}>MP4 preferred</option><option value="source" ${state.outputFormat==='source'?'selected':''}>Original format</option></select></div>
           <div class="setting-card-row"><div class="setting-label-col"><span class="setting-title">${t('settingsMaxConcurrent')}</span><span class="setting-desc">0-12 simultaneous downloads. 0 holds the queue. Lower limits use less RAM; excess downloads keep their progress.</span></div><div class="concurrency-stepper"><button class="btn-stepper" id="btn-concurrency-minus" aria-label="Decrease queue concurrency" ${state.maxConcurrentTasks<=0?'disabled':''}>-</button><span class="concurrency-val">${state.maxConcurrentTasks}</span><button class="btn-stepper" id="btn-concurrency-plus" aria-label="Increase queue concurrency" ${state.maxConcurrentTasks>=12?'disabled':''}>+</button></div></div>
+          <div class="setting-card-row setting-pending"><div class="setting-label-col"><label class="setting-title" for="settings-pending-limit">Queue limit</label><span class="setting-desc">Maximum videos waiting to download. 0 means unlimited. Profile batches wait for space; existing downloads are kept.</span></div><input type="number" class="modern-input" id="settings-pending-limit" min="0" max="10000" step="1" value="${state.maxPendingTasks}"></div>
         </div>
       </section>
       <section class="settings-section" aria-labelledby="settings-files-title"><div class="settings-section-heading">${icon('folder')}<h2 id="settings-files-title">Files and folders</h2></div>
@@ -857,6 +865,15 @@ function bindEvents() {
       if(!response?.success)throw Error(response?.error || 'Unable to cancel batch');
     } catch(error){state.isCancellingBatch=false;updateBatchControls();showToast(error.message,'error');}
   });
+  for(const [selector,action] of [['#btn-pause-profile-batch',()=>state.profileBatch?.batchPaused?'resume':'pause'],['#btn-retry-profile-batch',()=> 'retry-failed']]){
+    document.querySelector(selector)?.addEventListener('click',async()=>{
+      if(state.batchControlPending)return;
+      state.batchControlPending=true;updateBatchControls();
+      try{const response=await chrome.runtime.sendMessage({type:'profile-batch-'+action(),batchId:state.profileBatchId});if(!response?.success)throw Error(response?.error || 'Unable to update batch');}
+      catch(error){showToast(error.message,'error');}
+      finally{state.batchControlPending=false;updateBatchControls();}
+    });
+  }
   document.querySelector('#toggle-thumbnails')?.addEventListener('click',async()=>{
     try{await settingsStorage.setShowThumbnails(!state.showThumbnails);}catch(error){showToast(error.message,'error');}
   });
@@ -1046,6 +1063,10 @@ function bindEvents() {
   }
 
   // Settings: Concurrency Stepper
+  document.querySelector('#settings-pending-limit')?.addEventListener('change',async event=>{
+    try {state.maxPendingTasks=await settingsStorage.setMaxPendingTasks(event.target.value);render();}
+    catch(error){showToast(error.message,'error');}
+  });
   document.querySelector('[data-queue-limit]')?.addEventListener('change',async event=>{
     state.maxConcurrentTasks=await settingsStorage.setMaxConcurrentTasks(event.target.value);
     render();
@@ -1111,6 +1132,7 @@ async function init() {
     state.downloadSubdir = settings.downloadSubdir || '';
     state.useChannelFolder = settings.useChannelFolder !== false;
     state.maxConcurrentTasks = normalizeQueueLimit(settings.maxConcurrentTasks);
+    state.maxPendingTasks = normalizePendingLimit(settings.maxPendingTasks);
     state.outputFormat=settings.outputFormat || 'mp4';
     state.showThumbnails=settings.showThumbnails!==false;
   }
@@ -1121,6 +1143,7 @@ async function init() {
       state.downloadSubdir = s.downloadSubdir || '';
       state.useChannelFolder = s.useChannelFolder !== false;
       state.maxConcurrentTasks = normalizeQueueLimit(s.maxConcurrentTasks);
+      state.maxPendingTasks = normalizePendingLimit(s.maxPendingTasks);
       state.outputFormat=s.outputFormat || 'mp4';
       state.showThumbnails=s.showThumbnails!==false;
       render();
@@ -1166,6 +1189,7 @@ async function init() {
     const hs = historyStorage.getSnapshot();
     if (hs?.records) {
       state.history = hs.records;
+      updateBatchControls();
       updateProfileSelection();
       document.querySelectorAll('[data-role="history-count"]').forEach(node=>{node.textContent=state.history.length;});
       if (state.activeTab === 'video' || state.activeTab==='history') render();
