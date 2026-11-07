@@ -1,4 +1,3 @@
-import '../vendor/mux-mp4.min.js';
 import {HlsDownloader} from './hls-downloader.js';
 import {DirectDownloader} from './direct-downloader.js';
 import {resolveMedia} from './media-resolver.js';
@@ -42,8 +41,10 @@ async function run(value){
     };
     const renewal=task.pageUrl?()=>resolveSource(true):undefined;
     if(hls){
+      if(task.outputFormat==='mp4')await import('../vendor/mux-mp4.min.js');
+      controller.signal.throwIfAborted();
       engine=new HlsDownloader({saveFile,headerBridge,resolveSource:renewal,maxConcurrent:4,resourceRetries:0,timeout:60000,
-        transmuxerFactory:()=>new globalThis.muxjs.Transmuxer({keepOriginalTimestamps:false,remux:true}),onProgress,onFailure});
+        transmuxerFactory:task.outputFormat==='mp4'?()=>new globalThis.muxjs.Transmuxer({keepOriginalTimestamps:false,remux:true}):undefined,onProgress,onFailure});
       await engine.start(task.url,{fileName:task.fileName,headers:task.headers,quality:task.quality,opfsFileName:task.opfsCacheFileName,outputFormat:task.outputFormat || 'source',downloadSubdir:task.downloadSubdir});
     }else{
       engine=new DirectDownloader({saveFile,headerBridge,resolveSource:renewal,onSourceRefreshed:source=>{Object.assign(task,source);emit('source',{source});}});

@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "MediaFlow.Desktop (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "MediaFlow.Desktop (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

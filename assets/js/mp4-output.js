@@ -1,3 +1,6 @@
+import {Mp4File} from './mp4-file.js';
+export const MP4_CONVERTER_VERSION=2;
+
 // Refuse media codecs mux.js would otherwise silently drop from the output.
 export function checkTsCodecs(data){
   for(let offset=0;offset+188<=data.length;offset+=188){
@@ -16,40 +19,78 @@ export function checkTsCodecs(data){
     }
   }
 }
-// The pinned mux.js distribution is loaded only inside the download worker.
-export async function remuxToMp4({root,units,output,transmuxerFactory,check=()=>{},onProgress=()=>{}}) {
+// Append committed segments in playlist order while later segments download.
+// The output is committed only after every segment has been processed.
+export async function createMp4Remuxer({root,output,transmuxerFactory,fragmented=false,check=()=>{}}) {
+  check();
   const writer=await (await root.getFileHandle(output,{create:true})).createWritable();
-  let mux,bytes=0,initWritten=false,initialSegment,pending=[],muxError,elapsed=0,lastDiscontinuity=units[0]?.discontinuity;
+  const mp4=new Mp4File(writer);
+  let mux,initWritten=false,initialSegment,pending=[],muxError,elapsed=0,lastDiscontinuity,closed=false;
   const createMux=()=>{
     const instance=transmuxerFactory();
     instance.setBaseMediaDecodeTime?.(Math.round(elapsed*90000));
     instance.on('data',event=>{
       if(event.type==='audio')muxError=Object.assign(Error('MP4 conversion did not retain the video track'),{code:'CONVERSION_UNSUPPORTED'});
-      if(!initWritten){initialSegment=event.initSegment;pending.push(initialSegment);initWritten=true;}
+      if(!initWritten){initialSegment=event.initSegment;initWritten=true;}
       else if(initialSegment.length!==event.initSegment.length || initialSegment.some((value,i)=>value!==event.initSegment[i]))muxError=Object.assign(Error('The video changes its codec configuration; the original format is required'),{code:'CONVERSION_UNSUPPORTED'});
-      pending.push(event.data);
+      pending.push(event);
     });
     instance.on('error',error=>{muxError=Object.assign(Error(error.message || 'MP4 conversion is unsupported'),{code:'CONVERSION_UNSUPPORTED'});});
     return instance;
   };
+  const abort=async()=>{
+    if(closed)return;
+    closed=true;pending=[];mux?.dispose?.();mp4.dispose();
+    await writer.abort();
+  };
+  return {
+    async append(unit){
+      if(closed)throw Error('MP4 converter is closed');
+      try {
+        check();
+        if(fragmented){
+          const file=await (await root.getFileHandle(unit.cacheName)).getFile();
+          const data=new Uint8Array(await file.arrayBuffer());check();
+          if(unit.isMap){
+            if(initialSegment && (initialSegment.length!==data.length || initialSegment.some((n,i)=>n!==data[i])))throw Object.assign(Error('MP4 track configuration changes at a discontinuity'),{code:'CONVERSION_UNSUPPORTED'});
+            initialSegment=data;initWritten=true;return;
+          }
+          if(!initialSegment)throw Object.assign(Error('MP4 initialization is missing'),{code:'CONVERSION_UNSUPPORTED'});
+          await mp4.append({initSegment:initialSegment,data});return;
+        }
+        if(unit.isMap)return;
+        if(!mux || unit.discontinuity!==lastDiscontinuity){mux?.dispose?.();lastDiscontinuity=unit.discontinuity;mux=createMux();}
+        const file=await (await root.getFileHandle(unit.cacheName)).getFile();
+        checkTsCodecs(new Uint8Array(await file.slice(0,188*512).arrayBuffer()));
+        const reader=file.stream().getReader();
+        try {while(true){check();const {done,value}=await reader.read();if(done)break;mux.push(value);}}
+        finally {await reader.cancel().catch(()=>{});}
+        mux.flush();
+        if(muxError)throw muxError;
+        for(const event of pending){check();await mp4.append(event);}
+        pending=[];elapsed+=Number(unit.duration)||0;
+      }catch(error){await abort().catch(()=>{});throw error;}
+    },
+    async finish(){
+      if(closed)throw Error('MP4 converter is closed');
+      try {
+        check();
+        if(!initWritten)throw Object.assign(Error('This stream uses a codec that cannot be remuxed to MP4'),{code:'CONVERSION_UNSUPPORTED'});
+        const bytes=await mp4.finish();check();
+        await writer.close();closed=true;mux?.dispose?.();mp4.dispose();return bytes;
+      }catch(error){await abort().catch(()=>{});throw error;}
+    },
+    abort
+  };
+}
+
+// Retain the complete-cache entry point for callers outside the downloader.
+export async function remuxToMp4({units,onProgress=()=>{},...options}) {
+  const remuxer=await createMp4Remuxer(options);
   try {
-    mux=createMux();
     for(let index=0;index<units.length;index++){
-      check();
-      if(units[index].isMap)continue;
-      if(units[index].discontinuity!==lastDiscontinuity){mux.dispose?.();lastDiscontinuity=units[index].discontinuity;mux=createMux();}
-      const file=await (await root.getFileHandle(units[index].cacheName)).getFile();
-      checkTsCodecs(new Uint8Array(await file.slice(0,188*512).arrayBuffer()));
-      const reader=file.stream().getReader();
-      try {while(true){check();const {done,value}=await reader.read();if(done)break;mux.push(value);}}
-      finally {await reader.cancel().catch(()=>{});}
-      mux.flush();
-      if(muxError)throw muxError;
-      for(const data of pending){check();await writer.write(data);bytes+=data.byteLength;}
-      pending=[];elapsed+=Number(units[index].duration)||0;onProgress((index+1)/units.length);
+      await remuxer.append(units[index]);onProgress((index+1)/units.length);
     }
-    if(!initWritten || !bytes)throw Object.assign(Error('This stream uses a codec that cannot be remuxed to MP4'),{code:'CONVERSION_UNSUPPORTED'});
-    check();await writer.close();return bytes;
-  } catch(error){await writer.abort().catch(()=>{});throw error;}
-  finally {mux?.dispose?.();}
+    return await remuxer.finish();
+  }finally {await remuxer.abort().catch(()=>{});}
 }

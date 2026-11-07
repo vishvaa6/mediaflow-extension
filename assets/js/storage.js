@@ -1,3 +1,4 @@
+import {normalizeQueueLimit,normalizePendingLimit} from './queue-limits.js';
 export const StorageType = {Local:'local',Sync:'sync',Managed:'managed',Session:'session'};
 export function createStorage(key, defaults, options = {}) {
   const area = options.storageType || 'local';
@@ -25,7 +26,7 @@ export const historyStorage = {...history,
   async addRecord(fileName,url,pageUrl,metadata = {}) {
     const record={id:metadata.taskId || `${Date.now()}-${Math.random().toString(36).slice(2,8)}`,fileName,url,pageUrl:pageUrl?.trim() || undefined,completedAt:Date.now(),
       title:metadata.title || fileName,creator:metadata.creator || '',quality:metadata.quality,format:metadata.format,
-      thumbnail:metadata.thumbnail || '',thumbnails:metadata.thumbnails || [],bytes:metadata.bytes,downloadId:metadata.downloadId};
+      thumbnail:metadata.thumbnail || '',thumbnails:metadata.thumbnails || [],bytes:metadata.bytes,downloadId:metadata.downloadId,batchId:metadata.batchId};
     await history.set(current => ({records:[record,...(current.records || []).filter(old => old.id!==record.id)]}));
   },
   async removeRecord(id) { await history.set(current => ({records:current.records.filter(record => record.id!==id)})); },
@@ -55,13 +56,14 @@ export function sanitizeSubdir(value) {
   if(clean.length<=200)return clean;const truncated=clean.slice(0,200),last=truncated.lastIndexOf('/');return last>0?truncated.slice(0,last):truncated;
 }
 export const withSubdir=(name,subdir) => sanitizeSubdir(subdir) ? `${sanitizeSubdir(subdir)}/${name}` : name;
-const defaults={downloadSubdir:'',useChannelFolder:true,maxConcurrentTasks:6,showThumbnails:true,outputFormat:'mp4'};
+const defaults={downloadSubdir:'',useChannelFolder:true,maxConcurrentTasks:6,maxPendingTasks:0,showThumbnails:true,outputFormat:'mp4'};
 const settings=createStorage('download-settings',defaults,{storageType:'local',liveUpdate:true});
 export const settingsStorage={...settings,
   async setDownloadSubdir(value) { const next=sanitizeSubdir(value);await settings.set(old => ({...defaults,...old,downloadSubdir:next}));return next; },
   async setUseChannelFolder(value) { const next=!!value;await settings.set(old => ({...defaults,...old,useChannelFolder:next}));return next; },
-  async setMaxConcurrentTasks(value) { const next=Math.max(1,Math.min(20,Math.floor(Number(value)||6)));await settings.set(old => ({...defaults,...old,maxConcurrentTasks:next}));return next; },
-  async getMaxConcurrentTasks() { return Number((await settings.get()).maxConcurrentTasks)||6; },
+  async setMaxConcurrentTasks(value) { const next=normalizeQueueLimit(value);await settings.set(old => ({...defaults,...old,maxConcurrentTasks:next}));return next; },
+  async getMaxConcurrentTasks() { return normalizeQueueLimit((await settings.get()).maxConcurrentTasks); },
+  async setMaxPendingTasks(value) { const next=normalizePendingLimit(value);await settings.set(old => ({...defaults,...old,maxPendingTasks:next}));return next; },
   async setOutputFormat(value) {const next=value==='source'?'source':'mp4';await settings.set(old=>({...defaults,...old,outputFormat:next}));return next;},
   async setShowThumbnails(value) { const next=!!value;await settings.set(old => ({...defaults,...old,showThumbnails:next}));return next; }
 };

@@ -9,6 +9,8 @@ import {videoKey} from '../assets/js/video-details.js';
 import {remuxToMp4,checkTsCodecs} from '../assets/js/mp4-output.js';
 import {networkError} from '../assets/js/network.js';
 import {recognizedVideoPage} from '../assets/js/download-badges.js';
+import {fragment,mediaPayload,memoryRoot} from './fixtures/mp4.mjs';
+import {Mp4File} from '../assets/js/mp4-file.js';
 
 test('a slow but progressing body outlives the inactivity timeout',async()=>{
   const data=await fetchBytes('https://fixture.test/slow',{timeout:60,fetcher:async()=>new Response(new ReadableStream({async start(controller){for(let i=0;i<6;i++){await new Promise(resolve=>setTimeout(resolve,20));controller.enqueue(Uint8Array.of(i));}controller.close();}}))});
@@ -47,13 +49,13 @@ test('attached popup sizes respect browser limits and smaller displays',()=>{
 });
 test('an interrupted conversion aborts its output and can restart from the same cached segments',async()=>{
   const packet=new Uint8Array(188);packet[0]=0x47;packet[3]=0x10;
-  const files=new Map([['one',new Blob([packet])],['two',new Blob([packet])]]);let aborted=0,stopped=false;
-  const root={async getFileHandle(name){return {getFile:async()=>files.get(name),async createWritable(){const chunks=[];return {write:async value=>chunks.push(value),close:async()=>files.set(name,new Blob(chunks)),abort:async()=>{aborted++;}};}};}};
-  const factory=()=>{let data;return {on:(event,listener)=>{if(event==='data')data=listener;},push(){},flush(){data({type:'combined',initSegment:Uint8Array.of(1),data:Uint8Array.of(2)});},dispose(){}};};
+  const files=new Map([['one',packet],['two',packet]]);let aborted=0,stopped=false;
+  const base=memoryRoot(files),root={async getFileHandle(name){const handle=await base.getFileHandle(name),create=handle.createWritable;handle.createWritable=async()=>{const writer=await create();writer.abort=async()=>{aborted++;};return writer;};return handle;}};
+  const factory=()=>{let data,index=0;return {on:(event,listener)=>{if(event==='data')data=listener;},push(){},flush(){data(fragment(2,index++));},dispose(){}};};
   const options={root,units:[{cacheName:'one'},{cacheName:'two'}],output:'output.mp4',transmuxerFactory:factory};
   await assert.rejects(remuxToMp4({...options,check:()=>{if(stopped)throw new DOMException('Paused','AbortError');},onProgress:()=>{stopped=true;}}),error=>error.name==='AbortError');
-  assert.equal(aborted,1);assert.equal(files.has('output.mp4'),false);assert.equal(files.get('one').size,188);assert.equal(files.get('two').size,188);
-  assert.equal(await remuxToMp4(options),3);assert.deepEqual([...new Uint8Array(await files.get('output.mp4').arrayBuffer())],[1,2,2]);
+  assert.equal(aborted,1);assert.equal(files.has('output.mp4'),false);assert.equal(files.get('one').length,188);assert.equal(files.get('two').length,188);
+  assert.equal(await remuxToMp4(options),files.get('output.mp4').length);assert.deepEqual(mediaPayload(files.get('output.mp4')),[2,2]);
 });
 test('unsupported TS codecs are detected before MP4 conversion and disk failures are actionable',()=>{
   const packet=new Uint8Array(188);packet[0]=0x47;packet[1]=0x40;packet[3]=0x10;packet[4]=0;packet[5]=2;packet[6]=0xb0;packet[7]=18;packet[15]=0xf0;packet[17]=0x24;
@@ -61,6 +63,21 @@ test('unsupported TS codecs are detected before MP4 conversion and disk failures
   packet[17]=0x1b;assert.doesNotThrow(()=>checkTsCodecs(packet));
   assert.equal(networkError(new DOMException('Full','QuotaExceededError')).code,'STORAGE_FULL');
   assert.equal(networkError(Error('FILE_ACCESS_DENIED')).code,'SAVE_ACCESS');
+});
+
+test('large sample tables and long track durations finalize without integer or argument overflow',async()=>{
+  const files=new Map(),handle=await memoryRoot(files).getFileHandle('long'),writer=await handle.createWritable(),mp4=new Mp4File(writer);
+  await mp4.append(fragment(7,0,150001));const bytes=await mp4.finish();await writer.close();
+  const output=files.get('long');assert.equal(bytes,output.length);assert.equal(mediaPayload(output).length,150001);
+  const index=Buffer.from(output).indexOf('mdhd');assert.ok(index>0);assert.equal(output[index+4],1);
+  assert.equal(new DataView(output.buffer).getBigUint64(index+28),180000n*150001n);
+  mp4.dispose();assert.equal(mp4.tracks.size,0);
+});
+
+test('malformed MP4 fragments fail before output can be saved',async()=>{
+  const files=new Map(),handle=await memoryRoot(files).getFileHandle('invalid'),writer=await handle.createWritable(),mp4=new Mp4File(writer);
+  await assert.rejects(mp4.append({initSegment:Uint8Array.of(0,1),data:new Uint8Array()}),error=>error.code==='CONVERSION_UNSUPPORTED');
+  assert.equal(files.has('invalid'),false);await writer.abort();mp4.dispose();
 });
 test('toolbar opens an attached popup; source tracking never registers a detached window launcher',async()=>{
   const event=()=>({addListener(){}}),data={mediaflowSource:{tabId:1,windowId:1}},clicked=[];

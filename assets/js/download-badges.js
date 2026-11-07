@@ -27,16 +27,20 @@ export async function installDownloadBadges(){
       const owner=player.element.matches('video')?player.element.parentElement:player.element;
       if(owner)targets.set(owner,{pageUrl:player.pageUrl,key:videoKey(player.pageUrl)});
     }
+    const cards=new Map();
     for(const link of document.querySelectorAll('a[href]')){
       const url=link.href;if(!recognizedVideoPage(url))continue;
-      let owner;
       if(xPost(url))continue;
-      else owner=link.closest('.thumbnail') || cardOwner(link);
-      const visual=owner && (owner.matches('.thumbnail,li.videoBox,.pcVideoListItem,.thumb-block,.thumb-list__item,[data-video-id],.video-card,.video-item') || owner.querySelector('img,video'));
-      if(visual && !targets.has(owner))targets.set(owner,{pageUrl:url,key:videoKey(url)});
+      const card=cardOwner(link);
+      const visual=card && (card.matches('.thumbnail,li.videoBox,.pcVideoListItem,.thumb-block,.thumb-list__item,[data-video-id],.video-card,.video-item') || card.querySelector('img,video'));
+      if(visual && !cards.has(card)){
+        const owner=card.matches('.thumbnail')?card:card.querySelector('.thumbnail') || card;
+        cards.set(card,{owner,pageUrl:url,key:videoKey(url)});
+      }
     }
+    for(const {owner,pageUrl,key} of cards.values())if(!targets.has(owner))targets.set(owner,{pageUrl,key});
     for(const video of document.querySelectorAll('video,iframe.player__frame,iframe[src*="javplayer.cc/e/"]')){
-      if([...targets.keys()].some(owner=>owner.contains(video)))continue;
+      if([...cards.keys(),...targets.keys()].some(owner=>owner.contains(video)))continue;
       const source=video.currentSrc || video.src;
       if(!recognizedVideoPage(location.href) && !/^https?:/.test(source))continue;
       const owner=video.parentElement;if(!owner || targets.has(owner))continue;

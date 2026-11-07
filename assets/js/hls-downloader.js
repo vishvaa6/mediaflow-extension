@@ -2,7 +2,7 @@ import {parsePlaylist, chooseVariant, compatiblePlaylists, encryptionIV} from '.
 import {needsSourceRefresh,httpError} from './source-refresh.js';
 import {exactRequestCondition} from './media-headers.js';
 import {fetchBytes} from './network.js';
-import {remuxToMp4} from './mp4-output.js';
+import {createMp4Remuxer,MP4_CONVERTER_VERSION} from './mp4-output.js';
 
 const checkpointName = base => `${base}.hls.json`;
 export async function removeHlsCache(base, storage = navigator.storage) {
@@ -48,6 +48,13 @@ export class HlsDownloader {
     this.urlGeneration = 0;
     this.sourceResolved = false;
     this.refreshAttempted = false;
+    this.outputFile = null;
+    this.fallbackReason = undefined;
+    this.remuxer = null;
+    this.remuxError = null;
+    this.remuxNext = 0;
+    this.remuxTail = Promise.resolve();
+    this.remuxEnabled = false;
     const running = this.run();
     this.currentRun = running;
     return running.finally(() => { if (this.currentRun === running) this.currentRun = null; });
@@ -159,7 +166,8 @@ export class HlsDownloader {
     const total = this.manifest?.units.filter(unit => !unit.isMap).length || 0;
     const done = this.manifest?.units.reduce((count,unit,i) => count+(!unit.isMap && this.completed.has(i) ? 1 : 0),0) || 0;
     this.callbacks.onProgress?.({bytesReceived:this.bytesReceived,finishNum:done,targetSegment:total,errorNum:0,
-      progress:total ? done/total*90 : 0,isFileDownloading:false,outputExtension:this.manifest?.outputExtension,...extra});
+      progress:total ? done/total*90 : 0,isFileDownloading:false,outputExtension:this.manifest?.outputExtension,
+      phase:this.remuxEnabled && !this.remuxError?'downloading-mp4':'downloading',...extra});
   }
   async refreshUrls(generation) {
     if (generation !== this.urlGeneration) return;
@@ -225,6 +233,7 @@ export class HlsDownloader {
         // Closing the segment, rather than a popup storage update, is the commit.
         this.completed.add(index);
         this.bytesReceived += data.length;
+        this.queueRemux();
         this.report();
         return;
       } catch (error) {
@@ -240,20 +249,45 @@ export class HlsDownloader {
       }
     }
   }
-  async assemble() {
-    const output = this.options.opfsFileName;
-    if(this.options.outputFormat==='mp4' && this.manifest.outputExtension==='ts' && this.transmuxerFactory){
-      const converted=output+'.converted.mp4';
-      if(this.manifest.convertedBytes && this.manifest.converterVersion===1){
+  async prepareRemux() {
+    if(this.options.outputFormat==='mp4' && (this.manifest.outputExtension==='mp4' || this.manifest.outputExtension==='ts' && this.transmuxerFactory)){
+      const converted=this.options.opfsFileName+'.converted.mp4';
+      if(this.completed.size===this.manifest.units.length && this.manifest.convertedBytes && this.manifest.converterVersion===MP4_CONVERTER_VERSION){
         try {if((await this.readFile(converted)).size===this.manifest.convertedBytes){this.outputFile=converted;return;}}catch{}
       }
+      this.remuxEnabled=true;
+      this.queueRemux();
+      this.report();
+    }
+  }
+  queueRemux() {
+    if(!this.remuxEnabled)return;
+    // Serialize disk/mux work independently of the parallel network workers.
+    this.remuxTail=this.remuxTail.then(async()=>{
+      if(this.remuxError)return;
+      while(this.remuxNext<this.manifest.units.length && this.completed.has(this.remuxNext)){
+        this.check();
+        this.remuxer ||= await createMp4Remuxer({root:this.root,output:this.options.opfsFileName+'.converted.mp4',transmuxerFactory:this.transmuxerFactory,fragmented:this.manifest.outputExtension==='mp4',check:()=>this.check()});
+        await this.remuxer.append(this.manifest.units[this.remuxNext]);
+        this.remuxNext++;
+      }
+    }).catch(error=>{this.remuxError=error;});
+  }
+  async assemble() {
+    const output = this.options.opfsFileName;
+    if(this.outputFile)return;
+    if(this.remuxEnabled){
       this.report({phase:'converting',progress:90});
       try {
-        const size=await remuxToMp4({root:this.root,units:this.manifest.units,output:converted,transmuxerFactory:this.transmuxerFactory,check:()=>this.check(),onProgress:fraction=>this.report({phase:'converting',progress:90+fraction*3})});
-        this.check();this.outputFile=converted;this.manifest.convertedBytes=size;this.manifest.converterVersion=1;await this.saveManifest();return;
+        await this.remuxTail;
+        this.check();
+        if(this.remuxError)throw this.remuxError;
+        const size=await this.remuxer.finish();
+        this.check();this.outputFile=output+'.converted.mp4';this.manifest.convertedBytes=size;this.manifest.converterVersion=MP4_CONVERTER_VERSION;await this.saveManifest();return;
       }catch(error){
         this.check();
         if(error.code!=='CONVERSION_UNSUPPORTED')throw error;
+        if(this.manifest.outputExtension==='mp4')throw Error('This MP4 stream could not be finalized safely. Cached segments were kept. '+error.message);
         this.fallbackReason='MP4 conversion is unavailable for this stream; saving the original TS format.';
         this.report({fallbackReason:this.fallbackReason});
       }
@@ -289,6 +323,7 @@ export class HlsDownloader {
     try {
       if (!this.options?.opfsFileName) throw Error('HLS cache filename is required');
       await this.prepare();
+      await this.prepareRemux();
       const pending = this.manifest.units.map((_,i) => i).filter(i => !this.completed.has(i));
       let next = 0, failure;
       const worker = async () => {
@@ -305,15 +340,18 @@ export class HlsDownloader {
       this.check();
       const outputExtension = this.outputFile ? 'mp4' : this.manifest.outputExtension;
       const outputBytes=this.outputFile?this.manifest.convertedBytes:this.manifest.outputBytes;
-      this.report({isFileDownloading:true,progress:94,phase:'saving',outputExtension,outputBytes,outputCacheFileName:this.outputFile || this.options.opfsFileName,fallbackReason:this.fallbackReason});
+      this.report({isFileDownloading:true,progress:94,phase:'saving',outputExtension,outputBytes,outputConverterVersion:this.outputFile?MP4_CONVERTER_VERSION:undefined,outputCacheFileName:this.outputFile || this.options.opfsFileName,fallbackReason:this.fallbackReason});
       await this.saveFile({opfsFileName:this.outputFile || this.options.opfsFileName,fileName:this.options.fileName,format:outputExtension === 'mp4' ? 'mp4' : 'm3u8',
-        downloadSubdir:this.options.downloadSubdir,bytesReceived:outputBytes,onProgress:data => this.report(data)});
+        downloadSubdir:this.options.downloadSubdir,bytesReceived:outputBytes,outputConverterVersion:this.outputFile?MP4_CONVERTER_VERSION:undefined,onProgress:data => this.report(data)});
       if (!this.destroyed) this.callbacks.onComplete?.({fileName:this.options.fileName});
     } catch (error) {
       if (!this.pauseRequested && !this.destroyed) {
         if(this.callbacks.onFailure)this.callbacks.onFailure(error);
         else this.callbacks.onError?.(`${error.message || String(error)}${needsSourceRefresh(error) ? '. Cached segments were kept; open the original video page and retry.' : ''}`);
       }
+    } finally {
+      await this.remuxTail;
+      await this.remuxer?.abort().catch(()=>{});
     }
   }
   async pauseSoft() {

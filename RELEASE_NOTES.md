@@ -1,4 +1,18 @@
-# MediaFlow v1.3.0 — complete interface redesign
+# Unreleased - MP4 playback repair and queue memory control
+
+- Finalize TS and fragmented HLS as conventional MP4 with complete sample tables, track durations, composition timing and keyframe indexes. Handle repeated AAC priming samples at discontinuities; preserve encoded audio/video and write media directly to disk. Release converter metadata when finished or paused.
+- Invalidate the older fragmented-output cache so Retry rebuilds from retained source segments. Unsafe MP4 finalization reports an error with the cache retained; unsupported TS/WebM conversion keeps its original format.
+- Add a remembered 0-12 queue limit beside the Downloads queue and in Settings. 0 holds all downloads; lowering the limit suspends excess transfers/saves and terminates their workers. Raising it resumes queued work while preserving manual pauses. Existing settings above 12 are clamped.
+- Validation includes full video/audio decoding, decoded sample comparisons, seeking, native fragmented HLS, discontinuities, worker shutdown/resume, queue restart recovery and stale-output rebuilds.
+
+## Earlier changes in this update
+
+- Added remembered MP4 (fast) / Original format choices beside the single-video and creator-batch download controls. Requests capture the selected format explicitly.
+- Compatible HLS segments now remux in playlist order while other segments download. The queue shows Downloading + MP4; output is committed only after conversion completes. Pause/retry retains source segments and completed MP4 can be saved again from cache.
+- Load the local MP4 library only for HLS downloads requesting MP4. Native MP4 downloads save directly; WebM and unsupported codecs retain their playable original format with an explanation.
+- Verified 92 unit tests, background startup, the Chrome popup fixture and offscreen worker integration. Chrome checks used in-process fixture responses because this environment blocks local socket connections. ffprobe verified H.264/AAC output, duration and discontinuity handling.
+
+# MediaFlow v1.3.0 - complete interface redesign
 
 - Reworked shared navigation into a compact single-line header and underlined tabs while keeping the toolbar-attached popup, saved resizing and explicit full-browser-tab action.
 - Reclaimed profile space: ten full fixture cards at 720×600, compared with eight previously. Source options remain collapsible and download actions remain visible while the library scrolls.

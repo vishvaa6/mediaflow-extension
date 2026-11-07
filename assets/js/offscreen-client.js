@@ -18,7 +18,7 @@ export class OffscreenDownload {
     if(message.event==='ready' && !this.saving){
       this.saving=true;this.output=message.output;
       try {
-        await this.onProgress?.({phase:'saving',progress:94,isFileDownloading:true,outputExtension:message.output.outputExtension,outputCacheFileName:message.output.opfsFileName,outputBytes:message.output.bytesReceived});
+        await this.onProgress?.({phase:'saving',progress:94,isFileDownloading:true,outputExtension:message.output.outputExtension,outputCacheFileName:message.output.opfsFileName,outputBytes:message.output.bytesReceived,outputConverterVersion:message.output.outputConverterVersion});
         await this.saveFile({...message.output,onProgress:this.onProgress});
         if(!this.stopped)this.onComplete?.();
       }catch(error){if(!this.stopped)this.onFailure?.(error);}
