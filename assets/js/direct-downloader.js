@@ -1,4 +1,4 @@
-import {needsSourceRefresh,httpError} from './source-refresh.js';
+import {needsSourceRefresh,httpError,retain474OnMissingSource} from './source-refresh.js';
 import {exactRequestCondition} from './media-headers.js';
 import {waitForData,networkError,retryAfterMs} from './network.js';
 
@@ -62,7 +62,7 @@ export class DirectDownloader {
       try { response = await this.openResponse(url,headers,requestStart,offset); }
       catch (error) {
         if (!needsSourceRefresh(error)) throw error;
-        if (!this.resolveSource) throw Error(`${error.message}. Open the original video page and retry. Cached data was kept.`);
+        if (!this.resolveSource) throw Object.assign(Error(`${error.message}. Open the original video page and retry. Cached data was kept.`),{code:error.code,status:error.status,retryAfter:error.retryAfter});
         try {
           const source = await this.waitForNetwork(this.resolveSource(this.abortController.signal));
           this.check();
@@ -74,6 +74,7 @@ export class DirectDownloader {
           this.check();
           response = await this.openResponse(url,headers,requestStart,offset);
         } catch (refreshError) {
+          refreshError=retain474OnMissingSource(error,refreshError);
           throw Object.assign(Error(`${error.message}. Link refresh failed: ${refreshError.message}. Cached data was kept; retry to continue.`),{code:refreshError.code,status:refreshError.status,retryAfter:refreshError.retryAfter});
         }
       }

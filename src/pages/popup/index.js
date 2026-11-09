@@ -432,7 +432,7 @@ async function batchDownloadProfileVideos() {
 // ---- Live progress helpers ----
 function taskStatusLabel(task) {
   if(task.status==='downloading' && task.phase==='downloading-mp4')return 'Downloading + MP4';
-  if(task.status==='queued' && task.nextRetryAt>Date.now())return `Retry ${task.retryCount}/3 · waiting`;
+  if(task.status==='queued' && task.nextRetryAt>Date.now())return `Retry ${task.retryCount} · waiting`;
   if (task.status === 'paused' || task.status === 'queued' || task.status === 'error') return task.status;
   if(task.phase==='resolving')return 'Resolving source…';
   if(task.phase==='converting')return 'Creating MP4…';
@@ -691,6 +691,7 @@ function renderVideoQueueTab() {
                   <div class="task-actions">
                     ${isDownloading || task.status === 'queued' ? `
                       <button class="btn-icon-btn" data-action="pause" data-id="${escapeHtml(task.id)}" title="Pause">${icon('pause')}</button>
+                      ${task.status==='queued' && task.nextRetryAt>Date.now()?`<button class="btn-icon-btn" data-action="retry" data-id="${escapeHtml(task.id)}" title="Retry now" aria-label="Retry now">${icon('rotate-cw')}</button>`:''}
                     ` : isPaused ? `
                       <button class="btn-icon-btn" data-action="resume" data-id="${escapeHtml(task.id)}" title="Resume">${icon('play')}</button>
                     ` : isError ? `
@@ -710,7 +711,7 @@ function renderVideoQueueTab() {
                     </button>
                   </div>
                 ` : ''}
-                ${task.nextRetryAt>Date.now()?`<div class="task-recovery-note" role="status">${icon('rotate-cw')}Temporary connection issue. Retry ${task.retryCount}/3 is queued; cached progress is retained.</div>`:''}
+                ${task.nextRetryAt>Date.now()?`<div class="task-recovery-note" role="status">${icon('rotate-cw')}Connection or server issue. Retry ${task.retryCount} is scheduled; cached progress is retained.</div>`:''}
                 ${task.fallbackReason?`<div class="task-recovery-note">${icon('info')}${escapeHtml(task.fallbackReason)}</div>`:''}
 
                 <div class="task-progress-bar-bg">

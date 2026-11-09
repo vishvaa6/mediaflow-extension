@@ -12,7 +12,7 @@ command('ffmpeg',['-y','-hide_banner','-loglevel','error','-f','lavfi','-i','tes
 command('ffmpeg',['-y','-hide_banner','-loglevel','error','-f','lavfi','-i','testsrc=size=160x90:rate=10','-t','1','-c:v','libvpx-vp9','-pix_fmt','yuv420p',path.join(out,'fixture.webm')]);
 command('ffmpeg',['-y','-hide_banner','-loglevel','error','-f','lavfi','-i','testsrc=size=160x90:rate=10','-t','1','-c:v','mpeg2video','-pix_fmt','yuv420p','-f','mpegts',path.join(out,'original.ts')]);
 const playlist=fs.readFileSync(path.join(out,'fixture.m3u8'),'utf8');
-const requests=new Map(),held=new Set(),saved=[],rules=new Map();
+const requests=new Map(),held=new Set(),saved=[],rules=new Map(),retryEvents=[];
 let hold=true,holdFive=true,expireFive=false,failNextSave=false,background,offscreen,browser,context,origin,maxActive=0;
 const values={'download-settings':{maxConcurrentTasks:2,outputFormat:'mp4'}};
 const count=url=>requests.set(url,(requests.get(url)||0)+1);
@@ -28,6 +28,7 @@ const server=http.createServer((req,res)=>{
   const media=url.pathname.match(/^\/media\/(\d+)\/(fixture\.m3u8|repeat\.m3u8|segment-\d+\.ts)$/);
   if(media){
     count(url.pathname);
+    if(media[1]==='7' && media[2]==='fixture.m3u8' && requests.get(url.pathname)<=4){res.writeHead(474);res.end();return;}
     if(media[1]==='5' && expireFive && url.searchParams.get('token')!=='fresh'){res.writeHead(472);res.end();return;}
     if(media[2]==='repeat.m3u8'){const entries=playlist.split('\n').filter(line=>line.startsWith('#EXTINF:') || line.startsWith('segment-')).join('\n');res.end('#EXTM3U\n'+entries+'\n#EXT-X-DISCONTINUITY\n'+entries+'\n#EXT-X-ENDLIST');return;}
     if(media[2]==='fixture.m3u8'){res.setHeader('Content-Type','application/vnd.apple.mpegurl');res.end(media[1]==='5'?playlist.replace(/(segment-\d+\.ts)/g,'$1?token='+url.searchParams.get('token')):playlist);return;}
@@ -68,6 +69,7 @@ async function createBackground(){
   await context.exposeBinding('testGet',async(source,keys)=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).filter(key=>values[key]!==undefined).map(key=>[key,structuredClone(values[key])])));
   await context.exposeBinding('testSet',async(source,patch)=>{
     const changes={};for(const [key,value]of Object.entries(patch)){changes[key]={oldValue:values[key],newValue:value};values[key]=structuredClone(value);}
+    for(const task of patch.downloadQueueState?.tasks || [])if(task.fileName==='Connection recovery' && task.status==='queued' && task.retryCount)retryEvents.push(structuredClone(task));
     maxActive=Math.max(maxActive,values.downloadQueueState?.tasks.filter(task=>task.status==='downloading').length || 0);
     await Promise.all(context.pages().filter(page=>!page.isClosed()).map(page=>page.evaluate(changes=>{for(const fn of window.localChanges)fn(changes);for(const fn of window.storageChanges)fn(changes,'local');},changes).catch(()=>{})));
   });
@@ -184,6 +186,10 @@ async function createBackground(){
   assert.deepEqual(fs.readFileSync(saved.at(-1).file),fs.readFileSync(path.join(out,'original.ts')));
   const original=JSON.parse(command('ffprobe',['-v','error','-show_entries','stream=codec_name','-of','json',saved.at(-1).file]));
   assert.ok(original.streams.some(stream=>stream.codec_name==='mpeg2video'));
+  const disconnected=await dispatch(background,{type:'download-queue-enqueue',url:origin+'/media/7/fixture.m3u8',pageUrl:origin+'/watch/7',format:'m3u8',fileName:'Connection recovery'},{id:'fixture'});
+  await until(()=>retryEvents.some(task=>task.id===disconnected.id && task.errorStatus===474 && task.nextRetryAt>0),'HTTP 474 retry scheduled');
+  await until(()=>values.m3u8DownloadHistory.records.some(record=>record.id===disconnected.id),'automatic HTTP 474 recovery');
+  assert.ok(requests.get('/media/7/fixture.m3u8')>=5,'recovery retries the rejected playlist');
   await until(()=>rules.size===0,'request header cleanup');
   console.log('PASS: real offscreen workers; deferred profile resolution; concurrency=2; coordinator restart adoption; 503 retry; HLS renewal across worker replacement; H.264/AAC MP4 and discontinuity duration verified by ffprobe; playable WebM/TS fallback; failed-save retry from cache; header cleanup.');
 })().catch(error=>{console.error(error);console.error(JSON.stringify({queue:values.downloadQueueState,requests:[...requests],saved},null,2));process.exitCode=1;}).finally(async()=>{

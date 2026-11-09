@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {fetchBytes,transientError,retryAfterMs} from '../assets/js/network.js';
+import {fetchBytes,transientError,retryAfterMs,retryDelay} from '../assets/js/network.js';
 import {installWindowManager} from '../assets/js/window-manager.js';
 import {clampPopupSize} from '../assets/js/popup-surface.js';
 import {readFileSync} from 'node:fs';
@@ -25,6 +25,9 @@ test('HTTP retry policy retains status and bounded Retry-After information',asyn
   await assert.rejects(fetchBytes('https://fixture.test/limited',{fetcher:async()=>new Response('',{status:429,headers:{'Retry-After':'5'}})}),error=>error.status===429 && error.retryAfter===5000 && transientError(error));
   assert.equal(retryAfterMs('1000'),120000);assert.equal(retryAfterMs('invalid'),0);
   assert.equal(transientError({status:403}),false);assert.equal(transientError({status:503}),true);
+  assert.equal(transientError({status:474}),true);assert.equal(transientError({status:408}),true);
+  for(const attempt of [1,3,20,1024,1000000])assert.ok(retryDelay(attempt)<=120000 && retryDelay(attempt)>=1000);
+  assert.equal(retryDelay(1,120000),120000);
 });
 test('MP4 preference does not downgrade quality to find a native MP4',()=>{
   const definitions=[{format:'m3u8',quality:1080,videoUrl:'hls'},{format:'mp4',quality:720,videoUrl:'low'},{format:'mp4',quality:1080,videoUrl:'native'}];

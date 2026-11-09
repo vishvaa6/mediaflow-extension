@@ -233,6 +233,27 @@ test('direct HTTP 472 refreshes the page source and verifies overlap after a new
   assert.deepEqual(calls,[['https://cdn.test/old.mp4','bytes=34464-'],['https://cdn.test/fresh.mp4','bytes=34464-']]);
   assert.deepEqual(updates,['https://cdn.test/fresh.mp4']);assert.deepEqual(storage.files.get('direct'),data);
 });
+test('HTTP 474 renews direct and HLS sources without discarding committed bytes',async()=>{
+  const storage=storageFixture();storage.files.set('direct',Uint8Array.of(1,2));let directSaved=false,directError,resolutions=0;
+  const direct=new DirectDownloader({storage,resolveSource:async()=>{resolutions++;return {url:'https://cdn.test/fresh.mp4',format:'mp4'};},saveFile:async()=>{directSaved=true;},fetcher:async url=>url.includes('old')?new Response('',{status:474}):new Response(Uint8Array.of(1,2,3),{status:206,headers:{'Content-Range':'bytes 0-2/3'}})});
+  await direct.start({url:'https://cdn.test/old.mp4',opfsFileName:'direct',onFailure:error=>{directError=error;}});
+  assert.equal(directError,undefined);assert.equal(directSaved,true);assert.equal(resolutions,1);assert.deepEqual([...storage.files.get('direct')],[1,2,3]);
+  const calls=[];let first;
+  first=new HlsDownloader({storage,maxConcurrent:1,fetcher:fixtureFetcher(calls,playlist(2,'?old')),saveFile:async()=>{},onProgress:p=>{if(p.finishNum===1){first.pauseRequested=true;first.controller.abort();}}});
+  await first.start(source,options);
+  let renewed=0,hlsError;
+  const hls=new HlsDownloader({storage,maxConcurrent:1,resolveSource:async()=>{renewed++;return 'https://video.test/fresh.m3u8';},fetcher:async url=>{calls.push(url);if(url.includes('?old'))return new Response('',{status:474});return new Response(url===source?playlist(2,'?old'):url.includes('.m3u8')?playlist(2,'?new'):bodyFor(Number(url.match(/seg-(\d+)/)[1])));},saveFile:async()=>{},onFailure:error=>{hlsError=error;}});
+  await hls.start(source,options);
+  assert.equal(hlsError,undefined);assert.equal(renewed,1);assert.equal(calls.filter(url=>url.includes('seg-0')).length,1);assert.deepEqual([...storage.files.get('test.ts')],[1,11,2,12]);
+  let noRefreshError;
+  await new DirectDownloader({storage,fetcher:async()=>new Response('',{status:474}),saveFile:async()=>assert.fail()}).start({url:'https://cdn.test/no-refresh.mp4',opfsFileName:'other',onFailure:error=>{noRefreshError=error;}});
+  assert.equal(noRefreshError.status,474);assert.equal(noRefreshError.code,'HTTP');
+  let missingDirect,missingHls;
+  const unavailable=async()=>{throw Error('The original video quality/format is unavailable. Cached data was kept; retry when it is available.');};
+  await new DirectDownloader({storage,resolveSource:unavailable,fetcher:async()=>new Response('',{status:474}),saveFile:async()=>assert.fail()}).start({url:'https://cdn.test/old.mp4',opfsFileName:'other',onFailure:error=>{missingDirect=error;}});
+  await new HlsDownloader({storage,resolveSource:unavailable,fetcher:async()=>new Response('',{status:474}),saveFile:async()=>assert.fail(),onFailure:error=>{missingHls=error;}}).start(source,{...options,opfsFileName:'missing.ts'});
+  assert.equal(missingDirect.status,474);assert.equal(missingHls.status,474);
+});
 
 test('direct refreshed content, size and invalid ranges never overwrite the partial file',async()=>{
   for(const scenario of ['content','size','range','short']){

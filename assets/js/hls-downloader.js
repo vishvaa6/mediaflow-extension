@@ -1,5 +1,5 @@
 import {parsePlaylist, chooseVariant, compatiblePlaylists, encryptionIV} from './hls-playlist.js';
-import {needsSourceRefresh,httpError} from './source-refresh.js';
+import {needsSourceRefresh,httpError,retain474OnMissingSource} from './source-refresh.js';
 import {exactRequestCondition} from './media-headers.js';
 import {fetchBytes} from './network.js';
 import {createMp4Remuxer,MP4_CONVERTER_VERSION} from './mp4-output.js';
@@ -138,7 +138,7 @@ export class HlsDownloader {
       try { playlist = await this.loadPlaylist(source); }
       catch (error) {
         if (this.stopped() || !needsSourceRefresh(error) || !this.resolveSource) throw error;
-        source = await this.renewSource();
+        try{source = await this.renewSource();}catch(refreshError){throw retain474OnMissingSource(error,refreshError);}
         playlist = await this.loadPlaylist(source);
       }
       let keyIndex = 0;
@@ -242,7 +242,7 @@ export class HlsDownloader {
         // by the queue and may be disabled here without disabling renewal.
         if(needsSourceRefresh(error)){
           if(renewed)throw Object.assign(Error('The media link was rejected after refresh. Cached segments were kept; open the original video page and retry.'),{status:error.status,code:'HTTP'});
-          renewed=true;await this.refreshUrls(generation);attempt--;continue;
+          renewed=true;try{await this.refreshUrls(generation);}catch(refreshError){throw retain474OnMissingSource(error,refreshError);}attempt--;continue;
         }
         if(attempt===this.resourceRetries)throw error;
         await new Promise(resolve => { const timer=setTimeout(done,this.retryInterval); const signal=this.controller.signal; function done(){clearTimeout(timer);signal.removeEventListener('abort',done);resolve();} signal.addEventListener('abort',done,{once:true}); });
