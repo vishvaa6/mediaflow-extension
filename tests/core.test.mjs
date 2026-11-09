@@ -231,6 +231,30 @@ test('a transient timeout queues a bounded retry, retains identity, and frees a 
   await h.manager.pause('1');h.engines[1].cb.onComplete();await until(()=>h.tasks().length===1);
   await h.manager.schedule();assert.equal(h.engines.length,2);await h.manager.remove('1');
 });
+test('HTTP 474 keeps retrying beyond three attempts, preserving progress and allowing Retry now',async()=>{
+  const h=await queueHarness([{...task('1'),cachedBytes:123,retryCount:5}]);
+  h.engines[0].cb.onError(Object.assign(Error('HTTP 474: unable to fetch video'),{status:474,code:'HTTP'}));
+  await until(()=>h.tasks()[0].retryCount===6);
+  const retry=h.tasks()[0];assert.equal(retry.status,'queued');assert.equal(retry.errorStatus,474);
+  assert.equal(retry.cachedBytes,123);assert.ok(retry.nextRetryAt>Date.now() && retry.nextRetryAt<=Date.now()+120000);
+  await h.manager.resume('1');await until(()=>h.engines.length===2);
+  h.engines[1].cb.onError(Object.assign(Error('HTTP 403: access denied'),{status:403,code:'HTTP'}));
+  await until(()=>h.tasks()[0].status==='error');assert.equal(h.tasks()[0].cachedBytes,123);
+  await h.manager.remove('1');
+});
+test('previous HTTP 474 and exhausted network errors recover on restart without resuming paused or permanent failures',async()=>{
+  const h=await queueHarness([
+    {...task('1'),status:'error',error:'HTTP 474: unable to fetch video',errorCode:'HTTP',cachedBytes:42},
+    {...task('2'),status:'error',errorCode:'NETWORK',retryCount:3,cachedBytes:99},
+    {...task('3'),status:'paused',errorCode:'NETWORK',retryCount:3},
+    {...task('4'),status:'error',error:'HTTP 403: forbidden',errorCode:'HTTP',retryCount:3},
+    {...task('5'),status:'error',error:'HTTP 474: rejected. Link refresh failed: HTTP 403: forbidden',errorCode:'HTTP'}
+  ],0);
+  assert.equal(h.tasks().find(t=>t.id==='1').status,'queued');assert.equal(h.tasks().find(t=>t.id==='1').cachedBytes,42);
+  assert.equal(h.tasks().find(t=>t.id==='2').status,'queued');assert.equal(h.tasks().find(t=>t.id==='2').cachedBytes,99);
+  assert.equal(h.tasks().find(t=>t.id==='3').status,'paused');
+  assert.equal(h.tasks().find(t=>t.id==='4').status,'error');assert.equal(h.tasks().find(t=>t.id==='5').status,'error');
+});
 test('pause releases a slot; resume waits for capacity and reuses the paused engine',async()=>{
   const h=await queueHarness([task('1'),task('2')]);
   assert.equal(h.engines.length,1);

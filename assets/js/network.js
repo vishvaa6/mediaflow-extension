@@ -8,11 +8,13 @@ export function networkError(error) {
   if (error instanceof TypeError && /fetch|network|load|stream|connection/i.test(error.message)) return Object.assign(Error('The connection was interrupted. Cached progress is retained.'),{code:'NETWORK'});
   return error instanceof Error ? error : Error(String(error));
 }
-export const transientError = error => ['TIMEOUT','NETWORK'].includes(error?.code) || error?.status === 429 || error?.status >= 500 && error?.status <= 599;
+export const transientError = error => ['TIMEOUT','NETWORK'].includes(error?.code) || [408,429,474].includes(error?.status) || error?.status >= 500 && error?.status <= 599;
 export const errorData = error => ({message:error?.message || String(error),code:error?.code,status:error?.status,retryAfter:error?.retryAfter});
 export const restoreError = value => Object.assign(Error(value?.message || String(value)),value);
 export function retryDelay(attempt,retryAfter=0) {
-  return Math.max(Math.min(120000,Number(retryAfter)||0),Math.round(1000 * 2 ** Math.max(0,attempt-1) * (1 + Math.random()*.2)));
+  const count=Number.isFinite(Number(attempt))?Math.max(1,Math.floor(Number(attempt))):1;
+  const exponential=Math.min(120000,Math.round(1000 * 2 ** Math.min(7,count-1) * (1 + Math.random()*.2)));
+  return Math.max(Math.min(120000,Math.max(0,Number(retryAfter)||0)),exponential);
 }
 export function retryAfterMs(value,now=Date.now()) {
   if (!value) return 0;

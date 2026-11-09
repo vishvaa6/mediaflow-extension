@@ -145,6 +145,7 @@ let browser;
   await picker.locator('#batch-pause').click();
   await background.waitForFunction(()=>readTestValues().profileBatchState?.batchPaused===true && readTestValues().downloadQueueState.tasks.every(task=>task.status==='paused' || task.status==='error'));
   await popup.waitForFunction(()=>document.querySelector('#btn-pause-profile-batch')?.textContent==='Resume batch');
+  await page.waitForFunction(()=>document.querySelector('#mediaflow-profile-picker').shadowRoot.querySelector('#batch-status').textContent.includes('Batch paused'));
   assert.match(await picker.locator('#batch-status').innerText(),/Batch paused/);
   await popup.locator('#btn-pause-profile-batch').click();
   await background.waitForFunction(()=>readTestValues().profileBatchState?.batchPaused===false);

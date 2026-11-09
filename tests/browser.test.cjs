@@ -49,6 +49,13 @@ const server = http.createServer((req,res) => {
     },{origin});
     await page.goto(origin+'/src/pages/popup/index.html');
     await page.waitForSelector('.task-speed-badge');
+    await page.evaluate(async()=>{window.savedQueue=(await testStorage.get('downloadQueueState')).downloadQueueState;await testStorage.set({downloadQueueState:{tasks:[{id:'retry-474',fileName:'Interrupted download',status:'queued',phase:'waiting',error:'HTTP 474: unable to fetch video',retryCount:7,nextRetryAt:Date.now()+60000,cachedBytes:1024}]}});});
+    await page.waitForSelector('[data-task-id="retry-474"] [aria-label="Retry now"]');
+    assert.match(await page.locator('[data-task-id="retry-474"] [data-role="status"]').innerText(),/Retry 7 · waiting/i);
+    assert.match(await page.locator('[data-task-id="retry-474"] .task-recovery-note').innerText(),/cached progress is retained/i);
+    await page.locator('[data-task-id="retry-474"] [aria-label="Retry now"]').click();
+    assert.equal(await page.evaluate(()=>sentMessages.some(message=>message.type==='download-queue-retry' && message.taskId==='retry-474')),true);
+    await page.evaluate(()=>testStorage.set({downloadQueueState:savedQueue}));
     assert.equal(await page.locator('#queue-limit option').count(),13);
     await page.locator('#queue-limit').selectOption('0');
     await page.waitForFunction(()=>document.querySelector('#queue-limit')?.value==='0');

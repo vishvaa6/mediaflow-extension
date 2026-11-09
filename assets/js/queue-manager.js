@@ -172,10 +172,10 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     clearTimeout(entry.progressTimer);
     meter.clear(task.id);
     error=networkError(error);
-    const current=await taskById(task.id),retryCount=Number(current?.retryCount)||0;
-    const retry=transientError(error) && retryCount<3;
+    const current=await taskById(task.id),retryCount=Math.max(0,Math.min(1000000,Number(current?.retryCount)||0));
+    const retry=transientError(error);
     await patch(task.id,{outputReady:entry.task.outputReady,outputCacheFileName:entry.task.outputCacheFileName,outputExtension:entry.task.outputExtension,outputBytes:entry.task.outputBytes,outputConverterVersion:entry.task.outputConverterVersion,fallbackReason:entry.task.fallbackReason,
-      status:retry?'queued':'error',phase:retry?'waiting':'error',error:error.message,errorCode:error.code || error.name,retryCount:retry?retryCount+1:retryCount,
+      status:retry?'queued':'error',phase:retry?'waiting':'error',error:error.message,errorCode:error.code || error.name,errorStatus:error.status,retryCount:retry?Math.min(1000000,retryCount+1):retryCount,
       nextRetryAt:retry?Date.now()+retryDelay(retryCount+1,error.retryAfter):undefined,downloadSpeed:0,speedFormatted:'',isFileDownloading:false,chromeDownloadId:undefined,cachedBytes:entry.instance?.getBytesReceived?.() || task.cachedBytes});
     await entry.instance?.destroy?.(false);
     if(useOffscreen && !(entry.instance instanceof OffscreenDownload))await notify({type:'mf-offscreen-command',command:'drop',taskId:task.id});
@@ -793,6 +793,16 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
     if(useOffscreen){const rules=await chrome.declarativeNetRequest.getSessionRules();const orphaned=rules.filter(rule=>rule.id>=600000000 && rule.id<1000000000 && !ownedRules.has(rule.id)).map(rule=>rule.id);if(orphaned.length)await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds:orphaned});}
     for (const task of (await queueStorage.get()).tasks) {
       const run=remoteRuns.find(run=>run.taskId===task.id);
+      // Recover errors left behind by older versions that stopped retrying.
+      // Never restart an explicitly paused task or an unrelated permanent error.
+      if(task.status==='error' && !run && !pausedBatches.has(task.batchId)){
+        const codes=[...String(task.error || '').matchAll(/\bHTTP\s+(\d{3})\b/gi)];
+        const status=task.errorStatus ?? (codes.length?Number(codes.at(-1)[1]):undefined);
+        if((status===474 || Number(task.retryCount)>=3) && transientError({code:task.errorCode,status})){
+          await patch(task.id,{status:'queued',phase:'waiting',errorStatus:status,nextRetryAt:Date.now(),downloadSpeed:0,speedFormatted:''});
+          continue;
+        }
+      }
       if(run && task.status!=='paused' && typeof task.chromeDownloadId!=='number'){
         const restored={...task,...run.task};
         const entry={kind:restored.format==='m3u8'?'m3u8':'mp4',phase:run.progress?.phase || 'downloading',task:restored,paused:false,subdir:restored.downloadSubdir || ''};
