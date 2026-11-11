@@ -693,6 +693,10 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
         const pageUrl=tab?.url || message.pageUrl;
         return {videoInfos:discovery.snapshot(message.tabId,pageUrl),pageUrl,...(isXPage(pageUrl)?{site:'x'}:isMissavPage(pageUrl)?{site:'missav'}:{})};
       })();break;
+      case 'media-player-sources':
+        if(!Number.isInteger(sender.tab?.id) || !chrome.tabs?.sendMessage)return false;
+        operation=chrome.tabs.sendMessage(sender.tab.id,{command:'get_video_info'},{frameId:sender.frameId || 0}).catch(()=>({}));
+        break;
       case 'download-queue-enqueue':
       case 'm3u8-download-start':
       case 'mp4-download-start':

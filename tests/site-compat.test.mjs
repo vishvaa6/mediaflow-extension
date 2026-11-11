@@ -77,6 +77,16 @@ test('generic HTML5, JSON-LD and player config extraction preserves URLs and nev
   assert.equal(extractMedia('<video src="javascript:alert(1)"></video>').definitions.length,0);
 });
 
+test('HLS resolution keeps separate audio from being silently discarded',async()=>{
+  const html='<video src="https://cdn.test/master.m3u8"></video>';
+  const audio='#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="separate",NAME="English",URI="audio.m3u8"';
+  const unsupported='#EXTM3U\n'+audio+'\n#EXT-X-STREAM-INF:BANDWIDTH=200,RESOLUTION=1920x1080,AUDIO="separate"\nvideo-only.m3u8';
+  assert.equal((await resolveMedia(html,'https://example.test/watch','best',async()=>unsupported)).url,'https://cdn.test/master.m3u8');
+  const mixed=unsupported+'\n#EXT-X-STREAM-INF:BANDWIDTH=100,NAME="720p"\ncombined.m3u8';
+  const chosen=await resolveMedia(html,'https://example.test/watch','best',async()=>mixed);
+  assert.equal(chosen.url,'https://cdn.test/combined.m3u8');assert.equal(chosen.quality,'720');
+});
+
 test('player header names are normalized and exact DNR filters cannot match a different signed URL',()=>{
   assert.deepEqual(mediaHeaders({referer:'https://player.test/',origin:'https://player.test'},'https://outer.test/watch'),{Referer:'https://player.test/',Origin:'https://player.test'});
   assert.deepEqual(mediaHeaders({Referer:'https://player.test/'},'https://outer.test/watch'),{Referer:'https://player.test/',Origin:'https://player.test'});

@@ -6,6 +6,7 @@ import {videoKey,downloadedRecord} from '../assets/js/video-details.js';
 import {createMediaDiscovery} from '../assets/js/media-discovery.js';
 import {DirectDownloader} from '../assets/js/direct-downloader.js';
 import {installQueueManager} from '../assets/js/queue-manager.js';
+import {bestPlayerDownload} from '../assets/js/player-download-button.js';
 
 const id='2050000000000000001', otherId='2050000000000000002';
 const page=`https://x.com/example/status/${id}`;
@@ -14,6 +15,12 @@ const video=(token='first')=>({type:'video',media_url_https:'https://pbs.twimg.c
   video_info:{variants:[{content_type:'application/x-mpegURL',url:'https://video.twimg.com/amplify_video/123/pl/master.m3u8'},
     {content_type:'video/mp4',bitrate:832000,url:url(360,token)},{content_type:'video/mp4',bitrate:2176000,url:url(720,token)}]}});
 const payload=(token='first')=>({id_str:id,text:'An X post',mediaDetails:[video(token)]});
+
+test('X one-click downloads prefer the highest available MP4 and fall back to HLS',()=>{
+  const choices=[{format:'m3u8',quality:'1080p',videoUrl:'hls'},{format:'mp4',quality:'360p',videoUrl:'low'},{format:'mp4',quality:'720p',videoUrl:'high'}];
+  assert.equal(bestPlayerDownload(choices).videoUrl,'high');assert.equal(bestPlayerDownload(choices.slice(0,1)).videoUrl,'hls');
+  assert.equal(bestPlayerDownload([]),undefined);
+});
 
 test('X and Twitter post URLs retain large IDs, video indices and stable history identities',()=>{
   for(const host of ['x.com','www.x.com','twitter.com','mobile.twitter.com']){
@@ -68,7 +75,12 @@ test('X public metadata uses the post ID and supports MP4 quality selection and 
   const calls=[];
   const fetcher=async(target,headers)=>{
     calls.push({target,headers});
-    return target.includes('tweet-result')?JSON.stringify(payload()):'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720\n720/video.m3u8';
+    return target.includes('tweet-result')?JSON.stringify(payload()):[
+      '#EXTM3U','#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="separate",URI="audio.m3u8"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=3,RESOLUTION=1280x720,AUDIO="separate"','720/video-only.m3u8',
+      '#EXT-X-STREAM-INF:BANDWIDTH=2,RESOLUTION=1280x720','https://external.test/720.m3u8',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720','720/video.m3u8',
+    ].join('\n');
   };
   const direct=await resolveMedia('',page,'720',fetcher,{format:'mp4',strictQuality:true});
   assert.equal(direct.url,url(720));assert.match(direct.title,/An X post/);

@@ -9,9 +9,24 @@ const page='https://missav.ws/en/sample-101';
 test('MissAV catalogue and detail routes preserve video identities across dm prefixes',()=>{
   assert.equal(isMissavPage('https://missav.ws/dm265/en'),true);
   assert.equal(missavVideoPage('https://missav.ws/dm265/en'),'');
-  assert.equal(missavVideoPage('/dm265/en/sample-101?utm_source=card#preview',page),page);
-  for(const host of ['missav.ws','www.missav.ws','missav.live','missav.com','missav.ai'])assert.ok(missavVideoPage(`https://${host}/en/sample-101`));
-  for(const value of ['/en/undefined','/en/release','/en/fc2','https://missav.ws.evil.test/en/sample-101','javascript:alert(1)'])assert.equal(missavVideoPage(value,page),'');
+  assert.equal(missavVideoPage('/dm265/en/sample-101?utm_source=card#preview',page),'https://missav.ws/dm265/en/sample-101');
+  for(const host of ['missav.ws','www.missav.ws','missav.live','missav.com','missav.ai','missav123.com','www.missav123.com'])assert.ok(missavVideoPage(`https://${host}/en/sample-101`));
+  assert.equal(missavVideoPage('https://missav123.com/dm36/en/juq-045'),'https://missav123.com/dm36/en/juq-045');
+  for(const value of ['/en/undefined','/en/release','/en/fc2','https://missav.ws.evil.test/en/sample-101','https://missav123.com.evil.test/en/sample-101','https://missav1234.com/en/sample-101','javascript:alert(1)'])assert.equal(missavVideoPage(value,page),'');
+});
+test('missav123 video resolution retains the exact dm-prefixed page for requests and source renewal',async()=>{
+  const actual='https://missav123.com/dm36/en/juq-045', calls=[];
+  const fetcher=async(url,headers)=>{calls.push({url,headers});return fixtures.master;};
+  const detected=await resolveMissavSources(fixtures.player(),actual,fetcher);
+  assert.ok(detected.length);assert.ok(detected.every(source=>source.headers.Referer===actual && source.headers.Origin==='https://missav123.com'));
+  const renewed=await resolveMedia(fixtures.player(fixtures.second),actual,'1080',fetcher,{format:'m3u8',strictQuality:true});
+  assert.equal(renewed.headers.Referer,actual);assert.equal(renewed.headers.Origin,'https://missav123.com');
+  assert.equal(renewed.url,`https://surrit.com/${fixtures.second}/1080p/video.m3u8`);
+  const discovery=createMediaDiscovery(),sender={tab:{id:123,url:actual},url:actual,frameId:0};
+  discovery.report({videoInfos:detected.map(source=>({...source,pageUrl:actual,site:'missav'}))},sender);
+  const observed=discovery.snapshot(123,actual);
+  assert.equal(observed.length,detected.length);
+  assert.ok(observed.every(source=>source.pageUrl===actual && source.headers.Referer===actual));
 });
 test('MissAV decodes the current packed source assignments without running page JavaScript',()=>{
   const definitions=extractMissavDefinitions(fixtures.packed(),page);

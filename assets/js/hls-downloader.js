@@ -3,6 +3,7 @@ import {needsSourceRefresh,httpError,retain474OnMissingSource} from './source-re
 import {exactRequestCondition} from './media-headers.js';
 import {fetchBytes} from './network.js';
 import {createMp4Remuxer,MP4_CONVERTER_VERSION} from './mp4-output.js';
+import {assertMediaResponse} from './media-response.js';
 
 const checkpointName = base => `${base}.hls.json`;
 export async function removeHlsCache(base, storage = navigator.storage) {
@@ -43,6 +44,8 @@ export class HlsDownloader {
     this.destroyed = false;
     this.controller = new AbortController();
     this.completed = new Set();
+    this.completedSegments = 0;
+    this.totalSegments = 0;
     this.keyPromises = new Map();
     this.refreshPromise = null;
     this.urlGeneration = 0;
@@ -93,6 +96,7 @@ export class HlsDownloader {
       }
       // Consume the body while timeout and header rules still apply.
       const data = response.data;
+      assertMediaResponse(data,{sniff:!range || range.start===0});
       this.check();
       if (range && data.length !== range.length) throw Error('Incomplete HLS byte-range segment');
       return {data,url:response.url || url};
@@ -152,19 +156,21 @@ export class HlsDownloader {
       await this.saveManifest();
     }
     this.bytesReceived = 0;
-    for (let i=0;i<this.manifest.units.length;i++) {
+    this.completedSegments = 0;
+    this.totalSegments = this.manifest.units.reduce((count,unit)=>count+(!unit.isMap?1:0),0);
+    // A new checkpoint is persisted before any segment can be committed.
+    // Only a restored checkpoint can have matching, trustworthy segment files.
+    for (let i=0;previous && i<this.manifest.units.length;i++) {
       this.check();
       try {
         const file = await this.readFile(this.manifest.units[i].cacheName);
-        if (file.size > 0) { this.completed.add(i); this.bytesReceived += file.size; }
+        if (file.size > 0) { this.completed.add(i); this.bytesReceived += file.size; if(!this.manifest.units[i].isMap)this.completedSegments++; }
       } catch (error) { if (error.name !== 'NotFoundError') throw error; }
     }
-    this.tsUrlList = this.manifest.units.map(unit => unit.url);
     this.report();
   }
   report(extra = {}) {
-    const total = this.manifest?.units.filter(unit => !unit.isMap).length || 0;
-    const done = this.manifest?.units.reduce((count,unit,i) => count+(!unit.isMap && this.completed.has(i) ? 1 : 0),0) || 0;
+    const total = this.totalSegments || 0, done = this.completedSegments || 0;
     this.callbacks.onProgress?.({bytesReceived:this.bytesReceived,finishNum:done,targetSegment:total,errorNum:0,
       progress:total ? done/total*90 : 0,isFileDownloading:false,outputExtension:this.manifest?.outputExtension,
       phase:this.remuxEnabled && !this.remuxError?'downloading-mp4':'downloading',...extra});
@@ -216,9 +222,12 @@ export class HlsDownloader {
       const generation = this.urlGeneration;
       try {
         const unit = this.manifest.units[index];
-        let data = (await this.request(unit.url,unit.range)).data;
+        // Fetch a new AES key while the first encrypted segment is in flight.
+        // keyFor shares the same promise across concurrent segments.
+        const [response,key] = await Promise.all([this.request(unit.url,unit.range),unit.key ? this.keyFor(unit.key) : null]);
+        let data = response.data;
         if (unit.key) {
-          try { data = new Uint8Array(await this.cryptoApi.subtle.decrypt({name:'AES-CBC',iv:encryptionIV(unit.key.iv,unit.sequence)},await this.keyFor(unit.key),data)); }
+          try { data = new Uint8Array(await this.cryptoApi.subtle.decrypt({name:'AES-CBC',iv:encryptionIV(unit.key.iv,unit.sequence)},key,data)); }
           catch (error) {
             if (error.name === 'OperationError') {
               this.keyPromises.delete(unit.key.cacheName);
@@ -232,6 +241,7 @@ export class HlsDownloader {
         await this.writeFile(unit.cacheName,data);
         // Closing the segment, rather than a popup storage update, is the commit.
         this.completed.add(index);
+        if(!unit.isMap)this.completedSegments++;
         this.bytesReceived += data.length;
         this.queueRemux();
         this.report();

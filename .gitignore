@@ -13,3 +13,9 @@ __pycache__/
 .agents/
 .vscode/
 *.log
+/android/.gradle/
+/android/.idea/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/*.iml

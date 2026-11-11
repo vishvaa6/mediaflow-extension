@@ -32,7 +32,7 @@ export function parsePlaylist(text, baseUrl) {
       let next = i+1;
       while (next < lines.length && (!lines[next] || lines[next].startsWith('#'))) next++;
       if (next >= lines.length) throw Error('HLS variant has no playlist URL');
-      variants.push({url:absolute(lines[next],baseUrl),height:Number(attrs.RESOLUTION?.split('x')[1]) || 0,bandwidth:Number(attrs.BANDWIDTH) || 0,audio:attrs.AUDIO});
+      variants.push({url:absolute(lines[next],baseUrl),height:Number(attrs.RESOLUTION?.split('x')[1]) || Number(attrs.NAME?.match(/^\d{3,4}/)?.[0]) || 0,bandwidth:Number(attrs.BANDWIDTH) || 0,audio:attrs.AUDIO});
       i = next;
     } else if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
       sequence = Number(line.split(':')[1]);
@@ -72,6 +72,15 @@ export function parsePlaylist(text, baseUrl) {
   if (!units.length) throw Error('The HLS playlist contains no video segments');
   if (!lines.includes('#EXT-X-ENDLIST') && !lines.includes('#EXT-X-PLAYLIST-TYPE:VOD')) throw Error('Persistent resume requires a complete video playlist; this stream is live');
   return {units,outputExtension:units.some(unit => unit.isMap) ? 'mp4' : 'ts'};
+}
+
+export async function expandHlsChoices(video,fetchText,acceptUrl=()=>true) {
+  const {variants,audioGroups}=parsePlaylist(await fetchText(video.videoUrl,video.headers),video.videoUrl);
+  if(!variants)return [video];
+  // Separate audio renditions cannot be saved with the video by the HLS engine.
+  return variants.filter(variant=>!audioGroups.includes(variant.audio) && acceptUrl(variant.url))
+    .sort((a,b)=>b.bandwidth-a.bandwidth)
+    .map(variant=>({...video,videoUrl:variant.url,quality:variant.height || 'Auto'}));
 }
 export function chooseVariant(variants, quality) {
   const sorted = [...variants].sort((a,b) => b.height-a.height || b.bandwidth-a.bandwidth);

@@ -51,6 +51,24 @@ function recordingMux(markers,onFlush=()=>{}) {
   return {on(event,fn){if(event==='data')listener=fn;},push(data){marker=data.at(-1);},flush(){markers.push(marker);listener(fragment(marker));onFlush(marker);},dispose(){}};
 }
 
+test('new HLS downloads start without probing missing segment files and track out-of-order progress',async()=>{
+  const storage=storageFixture(),root=await storage.getDirectory(),lookup=root.getFileHandle.bind(root),probes=[],progress=[];
+  root.getFileHandle=async(name,options)=>{if(name.includes('.hls-seg-') && !options?.create)probes.push(name);return lookup(name,options);};
+  let firstRequest=true,saved=false,error;
+  const master='#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nseg-0.ts\n#EXTINF:2,\nseg-1.ts\n#EXT-X-ENDLIST';
+  const engine=new HlsDownloader({storage,maxConcurrent:3,fetcher:async url=>{
+    if(url===source)return new Response(master);
+    if(firstRequest){firstRequest=false;assert.deepEqual(probes,[],'new downloads must not scan for nonexistent checkpoints');}
+    if(url.includes('seg-0'))await new Promise(resolve=>setTimeout(resolve,15));
+    return new Response(Uint8Array.of(1,2));
+  },onProgress:value=>progress.push([value.finishNum,value.targetSegment]),onFailure:value=>{error=value;},saveFile:async()=>{saved=true;}});
+  await engine.start(source,options);
+  assert.equal(error,undefined);assert.equal(saved,true);
+  assert.ok(progress.some(([done,total])=>done===0 && total===2));
+  assert.ok(progress.some(([done,total])=>done===1 && total===2));
+  assert.deepEqual(progress.at(-1),[2,2]);
+});
+
 test('MP4 remuxing starts before download finishes and preserves playlist order', {timeout:5000}, async()=>{
   const storage=storageFixture(),markers=[],phases=[];let release,firstConverted,saved;
   const held=new Promise(resolve=>{release=resolve;});
@@ -111,6 +129,61 @@ test('native fetch receiver is preserved for direct downloads',async()=>{
   assert.equal(error,undefined);assert.equal(saved,true);
 });
 
+test('direct downloads renew a successful HTTP response containing a split verification page without losing cached bytes',async()=>{
+  const storage=storageFixture(),calls=[];storage.files.set('direct',Uint8Array.of(1,2));
+  let saved,error,renewals=0;
+  const engine=new DirectDownloader({storage,saveFile:async()=>{saved=true;},resolveSource:async()=>{renewals++;return {url:'https://cdn.test/fresh.mp4',format:'mp4'};},
+    fetcher:async url=>{calls.push(url);if(url.endsWith('old.mp4'))return new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('<!DOC'));c.enqueue(new TextEncoder().encode('TYPE html><html>Verify</html>'));c.close();}}),{headers:{'Content-Type':'application/octet-stream'}});
+      return new Response(Uint8Array.of(1,2,3,4),{status:206,headers:{'Content-Range':'bytes 0-3/4','Content-Type':'text/html'}});
+    }});
+  await engine.start({url:'https://cdn.test/old.mp4',opfsFileName:'direct',totalBytes:4,onFailure:e=>{error=e;}});
+  assert.equal(error,undefined);assert.equal(saved,true);assert.equal(renewals,1);
+  assert.deepEqual(calls,['https://cdn.test/old.mp4','https://cdn.test/fresh.mp4']);assert.deepEqual([...storage.files.get('direct')],[1,2,3,4]);
+});
+
+test('direct downloads never save JSON or empty HTTP-success responses as video',async()=>{
+  for(const body of ['{"error":"sign in required"}','{"code":403,"msg":"Access denied"}','']){
+    const storage=storageFixture();let error,saved=false;
+    const engine=new DirectDownloader({storage,saveFile:async()=>{saved=true;},fetcher:async()=>new Response(body,{headers:{'Content-Type':'application/octet-stream'}})});
+    await engine.start({url:'https://cdn.test/file.mp4',opfsFileName:'direct',onFailure:e=>{error=e;}});
+    assert.equal(saved,false);assert.equal(error?.code,body?'INVALID_MEDIA_RESPONSE':'NETWORK');
+    assert.equal(storage.files.get('direct')?.length || 0,0);
+  }
+});
+
+test('an HTML access page instead of a resumed range triggers renewal without discarding the larger cache',async()=>{
+  const storage=storageFixture(),data=Uint8Array.from({length:70020},(_,i)=>i%251),offset=70000;
+  storage.files.set('direct',data.slice(0,offset));let saved,error;
+  const engine=new DirectDownloader({storage,saveFile:async()=>{saved=true;},resolveSource:async()=>({url:'https://cdn.test/fresh.mp4',format:'mp4'}),
+    fetcher:async(url,{headers})=>{if(url.endsWith('old.mp4'))return new Response('<html>Sign in</html>');
+      const start=Number(headers.get('Range').match(/=(\d+)/)[1]);return new Response(data.slice(start),{status:206,headers:{'Content-Range':`bytes ${start}-${data.length-1}/${data.length}`}});
+    }});
+  await engine.start({url:'https://cdn.test/old.mp4',opfsFileName:'direct',totalBytes:data.length,onFailure:e=>{error=e;}});
+  assert.equal(error,undefined);assert.equal(saved,true);assert.deepEqual(storage.files.get('direct'),data);
+});
+
+test('HLS master playlists with only separate audio fail before a silent video can be saved',async()=>{
+  const storage=storageFixture(),calls=[];let error;
+  const text='#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=100,RESOLUTION=1280x720,AUDIO="audio"\nvideo.m3u8';
+  const engine=new HlsDownloader({storage,fetcher:async url=>{calls.push(url);return new Response(text);},saveFile:async()=>assert.fail('The video-only stream must not be saved'),onFailure:e=>{error=e;}});
+  await engine.start(source,options);
+  assert.match(error?.message,/separate audio track/i);assert.deepEqual(calls,[source]);
+});
+
+test('HLS renews after a segment returns a verification page and retains completed segments',async()=>{
+  const storage=storageFixture(),calls=[];let saved,error,renewals=0;
+  const engine=new HlsDownloader({storage,maxConcurrent:1,resourceRetries:0,saveFile:async()=>{saved=true;},onFailure:e=>{error=e;},
+    resolveSource:async()=>{renewals++;return 'https://video.test/fresh.m3u8';},
+    fetcher:async url=>{calls.push(url);if(url===source)return new Response(playlist(2,'?old'));if(url.endsWith('fresh.m3u8'))return new Response(playlist(2,'?new'));
+      if(url.includes('seg-1.ts?old'))return new Response('<html><body>Verify your session</body></html>',{headers:{'Content-Type':'application/octet-stream'}});
+      return new Response(bodyFor(url.includes('seg-1')?1:0),{headers:{'Content-Type':'text/html'}});
+    }});
+  await engine.start(source,options);
+  assert.equal(error,undefined);assert.equal(saved,true);assert.equal(renewals,1);
+  assert.equal(calls.filter(url=>url.includes('seg-0')).length,1,'committed segments must not be fetched again');
+  assert.deepEqual([...storage.files.get('test.ts')],[1,11,2,12]);
+});
+
 test('a fresh HLS engine resumes only missing segments from durable OPFS files',async()=>{
   const storage=storageFixture(),calls=[],errors=[];
   let first;
@@ -162,6 +235,37 @@ test('AES-128 IV/key state survives a new downloader without downloading the key
   await new HlsDownloader({storage,maxConcurrent:1,fetcher,saveFile:async()=>{},onError:e=>errors.push(e)}).start(source,options);
   assert.deepEqual(errors,[]);assert.deepEqual([...storage.files.get('test.ts')],[1,11,2,12]);
   assert.equal(calls.filter(url=>url.endsWith('key.bin')).length,1);
+});
+
+test('encrypted HLS starts fetching its key before the first segment finishes', {timeout:5000}, async()=>{
+  const storage=storageFixture(),rawKey=Uint8Array.from({length:16},(_,i)=>i+1);
+  const key=await crypto.subtle.importKey('raw',rawKey,'AES-CBC',false,['encrypt']);
+  const encrypted=new Uint8Array(await crypto.subtle.encrypt({name:'AES-CBC',iv:encryptionIV('',0)},key,bodyFor(0)));
+  const text='#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:2,\nseg-0.ts\n#EXT-X-ENDLIST';
+  let release,seenKey,segmentStarted=false,saved=false,error;
+  const segment=new Promise(resolve=>{release=resolve;}),keyRequested=new Promise(resolve=>{seenKey=resolve;});
+  const engine=new HlsDownloader({storage,maxConcurrent:1,fetcher:async url=>{
+    if(url===source)return new Response(text);
+    if(url.endsWith('key.bin')){seenKey();return new Response(rawKey);}
+    segmentStarted=true;return segment;
+  },saveFile:async()=>{saved=true;},onFailure:value=>{error=value;}});
+  const running=engine.start(source,options);
+  try{await keyRequested;assert.equal(segmentStarted,true);}finally{release(new Response(encrypted));await running;}
+  assert.equal(error,undefined);assert.equal(saved,true);assert.deepEqual([...storage.files.get('test.ts')],[1,11]);
+});
+
+test('an expired encrypted HLS key refreshes alongside the segment without losing the download',async()=>{
+  const storage=storageFixture(),rawKey=Uint8Array.from({length:16},(_,i)=>i+1),calls=[];
+  const key=await crypto.subtle.importKey('raw',rawKey,'AES-CBC',false,['encrypt']);
+  const encrypted=new Uint8Array(await crypto.subtle.encrypt({name:'AES-CBC',iv:encryptionIV('',0)},key,bodyFor(0)));
+  const list=token=>`#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin?${token}"\n#EXTINF:2,\nseg-0.ts?${token}\n#EXT-X-ENDLIST`;
+  let saved=false,error;
+  const engine=new HlsDownloader({storage,maxConcurrent:1,resourceRetries:0,resolveSource:async()=> 'https://video.test/fresh.m3u8',
+    fetcher:async url=>{calls.push(url);if(url===source)return new Response(list('old'));if(url.endsWith('fresh.m3u8'))return new Response(list('new'));if(url.includes('key.bin?old'))return new Response('',{status:472});if(url.includes('key.bin?new'))return new Response(rawKey);return new Response(encrypted);},
+    saveFile:async()=>{saved=true;},onFailure:value=>{error=value;}});
+  await engine.start(source,options);
+  assert.equal(error,undefined);assert.equal(saved,true);assert.deepEqual([...storage.files.get('test.ts')],[1,11]);
+  assert.ok(calls.some(url=>url.includes('key.bin?new')));
 });
 
 test('initialization fragments and byte-range segments assemble once in MP4 order',async()=>{

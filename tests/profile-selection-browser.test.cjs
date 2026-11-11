@@ -71,11 +71,45 @@ let browser;
   await page.goto(origin+'/model/creator/videos');
   await page.waitForSelector('.mediaflow-pick-tick');
   await page.waitForFunction(()=>document.querySelectorAll('.mediaflow-download-status').length===6);
+  await page.evaluate(()=>{window.originalBadgeIcon=document.querySelector('.mediaflow-download-status').firstElementChild;dispatchEvent(new Event('scroll'));});
+  await page.waitForTimeout(350);
+  assert.equal(await page.evaluate(()=>window.originalBadgeIcon===document.querySelector('.mediaflow-download-status').firstElementChild),true,'unchanged badges must not rebuild their SVG on every refresh');
+  await page.evaluate(async()=>{
+    window.queueBackup=(await testStorage.get('downloadQueueState')).downloadQueueState;
+    await testStorage.set({downloadQueueState:{tasks:[{id:'progress-fixture',status:'paused',cachedBytes:0}]}});
+  });
+  await page.waitForTimeout(400);
+  await page.evaluate(()=>{
+    window.tickChanges=0;
+    window.tickObserver=new MutationObserver(changes=>{tickChanges+=changes.length;});
+    tickObserver.observe(document.querySelector('.mediaflow-pick-tick'),{attributes:true,attributeFilter:['aria-checked']});
+  });
+  await page.evaluate(async()=>{for(let i=1;i<=10;i++)await testStorage.set({downloadQueueState:{tasks:[{id:'progress-fixture',status:'paused',cachedBytes:i}]}});});
+  await page.waitForTimeout(400);
+  assert.equal(await page.evaluate(()=>tickChanges),0,'byte-only queue updates must not rebuild profile controls');
+  await page.evaluate(async()=>{tickObserver.disconnect();await testStorage.set({downloadQueueState:queueBackup});});
   assert.equal(await page.locator('li.videoBox').evaluateAll(cards=>cards.every(card=>card.querySelectorAll('.mediaflow-download-status').length===1 && card.querySelector('.thumbnail .mediaflow-download-status'))),true,'each video has one status on its thumbnail');
+  await page.evaluate(async()=>{
+    window.badgeHistoryBackup=(await testStorage.get('m3u8DownloadHistory')).m3u8DownloadHistory;
+    const video='/view_video.php?viewkey=badge-duplicate',other='/view_video.php?viewkey=badge-other';
+    document.querySelector('.videoUList').insertAdjacentHTML('beforeend',`
+      <li class="videoBox" id="badge-split-1"><div data-video-id="thumb-one"><a href="${video}"><img src="/icon-34.png"></a></div><span data-video-id="title-one"><a href="${video}">First title</a></span></li>
+      <li class="videoBox" id="badge-split-2"><div data-video-id="thumb-two"><a href="${video}"><picture><img src="/icon-34.png"></picture></a></div><span data-video-id="title-two"><a href="${video}">Same video elsewhere</a></span></li>
+      <li class="videoBox" id="badge-nested"><div class="video-card" data-video-id="nested"><a href="${video}"><img src="/icon-34.png"></a></div><a href="${video}">Nested card title</a></li>
+      <li class="videoBox" id="badge-other"><div data-video-id="other"><a href="${other}"><img src="/icon-34.png"></a></div><a href="${other}">Other video</a></li>`);
+  });
+  const badgeCards=['badge-split-1','badge-split-2','badge-nested','badge-other'];
+  await page.waitForFunction(ids=>ids.every(id=>document.querySelectorAll('#'+id+' .mediaflow-download-status').length===1),badgeCards);
+  assert.equal(await page.evaluate(ids=>ids.every(id=>{const card=document.getElementById(id),image=card.querySelector('img'),owner=image.parentElement.matches('picture')?image.parentElement.parentElement:image.parentElement;return owner.contains(card.querySelector('.mediaflow-download-status'));}),badgeCards),true,'the single status belongs to the thumbnail');
+  await page.evaluate(async()=>testStorage.set({m3u8DownloadHistory:{records:[...badgeHistoryBackup.records,{id:'badge-test',pageUrl:location.origin+'/view_video.php?viewkey=badge-duplicate'}]}}));
+  await page.waitForFunction(()=>['badge-split-1','badge-split-2','badge-nested'].every(id=>document.querySelector('#'+id+' .mediaflow-download-status')?.dataset.downloaded==='true'));
+  assert.equal(await page.locator('#badge-other .mediaflow-download-status').getAttribute('data-downloaded'),'false','other videos keep their own status');
+  await page.evaluate(async ids=>{ids.forEach(id=>document.getElementById(id).remove());await testStorage.set({m3u8DownloadHistory:badgeHistoryBackup});},badgeCards);
   await page.evaluate(()=>document.querySelector('li.videoBox').append(document.querySelector('.mediaflow-pick-tick').cloneNode(true)));
   await page.waitForFunction(()=>document.querySelectorAll('.mediaflow-pick-tick').length===6);
   await page.evaluate(()=>document.querySelector('.videoUList').insertAdjacentHTML('beforeend','<div id="unknown-card"><div><a href="/view_video.php?viewkey=99"><img alt="" src="/icon-34.png"><span>2:30</span></a></div><a href="/view_video.php?viewkey=99">A descriptive title</a></div>'));
   await page.waitForFunction(()=>document.querySelectorAll('#unknown-card .mediaflow-pick-tick').length===1);
+  await page.waitForSelector('#unknown-card .mediaflow-download-status');
   assert.equal(await page.evaluate(async()=>{const {parseProfileDocument}=await import('/assets/js/profile-scanner.js');return parseProfileDocument(document,location.href).videos.find(video=>video.id==='99').title;}),'A descriptive title');
   await page.evaluate(()=>document.querySelector('#unknown-card').remove());
   const toolbar=page.locator('#mediaflow-profile-picker');
@@ -129,7 +163,7 @@ let browser;
   assert.equal(await popup.evaluate(()=>getComputedStyle(document.querySelector('.profile-video-grid')).gridTemplateColumns.split(' ').length),2);
   assert.equal(await popup.evaluate(()=>getComputedStyle(document.querySelector('.profile-video-grid')).maxHeight),'none');
   assert.ok(await popup.evaluate(()=>[...document.querySelectorAll('.profile-video-card')].filter(card=>card.getBoundingClientRect().top>=0 && card.getBoundingClientRect().bottom<=innerHeight).length)>=4,'the larger profile workspace must show at least four full cards');
-  assert.equal(await popup.evaluate(()=>document.fonts.check('400 12px MediaFlowPoppins')),true);
+  assert.match(await popup.evaluate(()=>getComputedStyle(document.body).fontFamily),/Segoe UI|system-ui/,'the workspace uses the platform system font');
   await popup.screenshot({path:path.join(root,'test-results/profile-workspace-1000.png'),fullPage:true});
   await popup.setViewportSize({width:1400,height:760});
   assert.equal(await popup.evaluate(()=>getComputedStyle(document.querySelector('.profile-video-grid')).gridTemplateColumns.split(' ').length),3);

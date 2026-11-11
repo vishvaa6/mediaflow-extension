@@ -1,6 +1,6 @@
 // These responses commonly reject an expired/signed media URL. A refreshed
 // page can provide a new URL, but the cached media must still be validated.
-export const needsSourceRefresh = error => [401,403,404,410,472,474].includes(error?.status);
+export const needsSourceRefresh = error => error?.code === 'INVALID_MEDIA_RESPONSE' || [401,403,404,410,472,474].includes(error?.status);
 
 // A temporary missing source after a 474 is still retryable. Do not mask a
 // different HTTP error or a safety error such as a changed playlist.

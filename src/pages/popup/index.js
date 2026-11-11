@@ -1,5 +1,5 @@
 import {formatSpeed} from '../../../assets/js/speed.js';
-import {downloadedRecord,sortQualities,profileKey,videoKey} from '../../../assets/js/video-details.js';
+import {createDownloadedLookup,sortQualities,profileKey,videoKey} from '../../../assets/js/video-details.js';
 import {selectionView,changeSelection,rangeHint} from '../../../assets/js/profile-selection.js';
 import {mediaHeaders} from '../../../assets/js/media-headers.js';
 import {isXPage} from '../../../assets/js/x-media.js';
@@ -8,7 +8,9 @@ import {icon} from '../../../assets/js/icons.js';
 import {createPopupSurface} from '../../../assets/js/popup-surface.js';
 import {normalizeQueueLimit,normalizePendingLimit} from '../../../assets/js/queue-limits.js';
 import {batchProgress} from '../../../assets/js/batch-progress.js';
+import {createLiquidWorkspace} from '../../../assets/js/liquid-workspace.js';
 const popupSurface=createPopupSurface();
+const liquidWorkspace=createLiquidWorkspace();
 const isManagedPage=value=>isXPage(value) || isMissavPage(value);
 import {
   i as sanitizeSubdir,
@@ -155,7 +157,7 @@ const state = {
   maxConcurrentTasks: 6,
   maxPendingTasks: 0,
   outputFormat:'mp4',profileSourceOpen:false,profileListScroll:0,profileSearchQuery:'',viewScroll:{},
-  tasks: [],
+  tasks: [],queuePage:0,
   history: [],
   // Profile state
   profileName: '',
@@ -191,7 +193,7 @@ function showToast(text, type = 'info') {
 }
 
 const thumbnailCache = new Map();
-function mergeDetectedVideos(videos,fromSite=false) {
+function mergeDetectedVideos(videos,fromSite=false,renderChanges=true) {
   if(!Array.isArray(videos) || !videos.length)return;
   if(fromSite)state.hasSiteDetection=true;
   if(!fromSite && state.hasSiteDetection)videos=videos.filter(video=>state.detectedVideos.some(current=>current.videoUrl===video.videoUrl));
@@ -206,11 +208,12 @@ function mergeDetectedVideos(videos,fromSite=false) {
   const next=values.some(video=>video.site==='x' || video.site==='missav')
     ? [...new Set(values.map(video=>video.pageUrl))].flatMap(pageUrl=>sortQualities(values.filter(video=>video.pageUrl===pageUrl)))
     : sortQualities(values);
-  if(JSON.stringify(next)!==JSON.stringify(state.detectedVideos)){state.detectedVideos=next;if(state.activeTab==='video')render();}
+  if(JSON.stringify(next)!==JSON.stringify(state.detectedVideos)){state.detectedVideos=next;if(renderChanges && state.activeTab==='video')render();}
 }
 function applyDetectionSnapshot(result) {
   if(result?.site==='x' || result?.site==='missav'){
     if(result.site==='x'?!isXPage(result.pageUrl):!isMissavPage(result.pageUrl))return;
+    const before=JSON.stringify([state.activePageUrl,state.activePageTitle,state.customFilename,state.videoThumbnail,state.videoThumbnails,state.detectionError,state.detectionStatus,state.detectedVideos]);
     const pageChanged=state.activePageUrl!==result.pageUrl;
     state.activePageUrl=result.pageUrl;
     if(pageChanged || result.pageTitle){
@@ -224,8 +227,9 @@ function applyDetectionSnapshot(result) {
     state.detectionStatus=result.detectionStatus || '';
     state.detectedVideos=[];
     state.hasSiteDetection=true;
-    mergeDetectedVideos(result.videoInfos,true);
-    if(state.activeTab==='video')render();
+    mergeDetectedVideos(result.videoInfos,true,false);
+    const after=JSON.stringify([state.activePageUrl,state.activePageTitle,state.customFilename,state.videoThumbnail,state.videoThumbnails,state.detectionError,state.detectionStatus,state.detectedVideos]);
+    if(state.activeTab==='video' && before!==after)render();
   }else mergeDetectedVideos(result?.videoInfos);
 }
 let detectionRequest=0;
@@ -247,9 +251,17 @@ const pendingTaskActions = new Set();
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 }
-function profileVideoDownloaded(video) {return !!video && !!downloadedRecord(state.history,video.url,video.videoUrl);}
+let historyIndex,historyIndexSource;
+function isDownloaded(pageUrl,streamUrl){if(historyIndexSource!==state.history){historyIndexSource=state.history;historyIndex=createDownloadedLookup(state.history);}return historyIndex(pageUrl,streamUrl);}
+function profileVideoDownloaded(video) {return !!video && isDownloaded(video.url,video.videoUrl);}
 function currentProfileSelection() {return state.profileSelection?.profileKey === profileKey(state.profileUrl) ? state.profileSelection : null;}
-function profileSelectionView() {return selectionView(state.profileVideos,currentProfileSelection(),state.history);}
+let selectionCache;
+function profileSelectionView() {
+  const selection=currentProfileSelection();
+  if(!selectionCache || selectionCache.videos!==state.profileVideos || selectionCache.selection!==selection || selectionCache.history!==state.history)
+    selectionCache={videos:state.profileVideos,selection,history:state.history,view:selectionView(state.profileVideos,selection,state.history)};
+  return selectionCache.view;
+}
 function syncSelectedIds() {state.selectedIds=new Set(profileSelectionView().videos.map(video => video.id));}
 function applySavedSelection(selection) {state.profileSelection=selection || null;updateProfileSelection();}
 async function selectProfileVideos(action,video) {
@@ -331,9 +343,12 @@ function updateProfileSelection() {
 }
 function bindThumbnailFallbacks() {
   if(!state.showThumbnails)return;
-  const items=[...state.profileVideos,...state.history.map(record => ({...record,id:'history:'+record.id,url:record.pageUrl || record.url})),currentVideoThumbnail()];
-  document.querySelectorAll('img[data-thumbnail-id]').forEach(img => {
-    const video = items.find(video => video.id === img.dataset.thumbnailId);
+  const images=document.querySelectorAll('img[data-thumbnail-id]');if(!images.length)return;
+  const items=new Map(state.profileVideos.map(video=>[String(video.id),video]));
+  for(const record of state.history)items.set('history:'+record.id,{...record,id:'history:'+record.id,url:record.pageUrl || record.url});
+  items.set('current',currentVideoThumbnail());
+  images.forEach(img => {
+    const video = items.get(img.dataset.thumbnailId);
     if (!video) return;
     const candidates = [...new Set([video.thumbnail, ...(video.thumbnails || [])].filter(Boolean))];
     let index = Math.max(0,candidates.indexOf(img.getAttribute('src')));
@@ -362,11 +377,11 @@ function thumbnailHtml(video,className) {
   return url ? `<img src="${escapeHtml(url)}" data-thumbnail-id="${escapeHtml(video.id)}" class="${className}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="${escapeHtml(video.title || '')}" />` : '<span class="thumbnail-placeholder">Thumbnail unavailable</span>';
 }
 function downloadedLabel(pageUrl,streamUrl='') {
-  const downloaded=!!downloadedRecord(state.history,pageUrl,streamUrl);
+  const downloaded=isDownloaded(pageUrl,streamUrl);
   return `<span class="download-state-label ${downloaded?'already-downloaded':'not-downloaded'}" data-downloaded-page="${escapeHtml(pageUrl)}" data-downloaded-stream="${escapeHtml(streamUrl)}">${icon(downloaded?'check-check':'circle')}${downloaded?'Downloaded':'Not downloaded'}</span>`;
 }
 function updateDownloadedLabels() {
-  document.querySelectorAll('[data-downloaded-page]').forEach(label => {const downloaded=!!downloadedRecord(state.history,label.dataset.downloadedPage,label.dataset.downloadedStream);label.hidden=false;label.classList.toggle('already-downloaded',downloaded);label.classList.toggle('not-downloaded',!downloaded);label.innerHTML=icon(downloaded?'check-check':'circle')+(downloaded?'Downloaded':'Not downloaded');});
+  document.querySelectorAll('[data-downloaded-page]').forEach(label => {const downloaded=isDownloaded(label.dataset.downloadedPage,label.dataset.downloadedStream);label.hidden=false;label.classList.toggle('already-downloaded',downloaded);label.classList.toggle('not-downloaded',!downloaded);label.innerHTML=icon(downloaded?'check-check':'circle')+(downloaded?'Downloaded':'Not downloaded');});
 }
 function currentBatchProfileKey(){return state.profileUrl?profileKey(state.profileUrl,state.profileName):state.profileBatchKey;}
 function profileBatchTasks(){return state.profileBatchKey===currentBatchProfileKey()?state.tasks.filter(task => task.batchId===state.profileBatchId):[];}
@@ -455,16 +470,31 @@ function taskProgressNumsHtml(task) {
   `;
 }
 
-// Signature of things that require a full re-render (task set / status changes)
+const queuePageSize=30;
+function visibleQueueTasks(tasks=state.tasks){
+  const pages=Math.max(1,Math.ceil(tasks.length/queuePageSize));
+  state.queuePage=Math.min(Math.max(0,state.queuePage),pages-1);
+  return tasks.slice(state.queuePage*queuePageSize,(state.queuePage+1)*queuePageSize);
+}
+// Only visible task structure and overall counts require a queue re-render.
 function taskStructureKey(tasks) {
-  return (tasks || []).map(t => `${t.id}:${t.status}:${t.phase}:${!!t.isFileDownloading}:${t.error || ''}:${t.fallbackReason || ''}:${t.outputExtension || ''}`).join('|');
+  tasks=tasks || [];
+  const counts={downloading:0,queued:0,error:0},urls=new Set(),batch=[];
+  for(const task of tasks){if(task.status in counts)counts[task.status]++;if(task.status!=='error' && task.url)urls.add(task.url);if(task.batchId && task.batchId===state.profileBatchId)batch.push([task.id,task.status]);}
+  const visible=visibleQueueTasks(tasks).map(t=>[t.id,t.status,t.phase,!!t.isFileDownloading,t.error,t.fallbackReason,t.outputExtension,t.outputFormat,t.outputReady,t.fileName,t.nextRetryAt,t.retryCount]);
+  return JSON.stringify([tasks.length,state.queuePage,counts,visible,batch,state.detectedVideos.map(video=>urls.has(video.videoUrl))]);
 }
 let lastTaskStructureKey = '';
+let lastTaskSnapshot = '';
+const progressMarkup = new WeakMap();
 
 // Apply new task list: patch progress in place when possible, else full render
 function applyTasks(tasks) {
   state.tasks = tasks || [];
-  const key = taskStructureKey(state.tasks);
+  const key = taskStructureKey(state.tasks), visible=visibleQueueTasks(state.tasks);
+  const snapshot=key+'|'+JSON.stringify(visible)+'|'+visible.map(taskStatusLabel).join('|');
+  if(snapshot===lastTaskSnapshot)return;
+  lastTaskSnapshot=snapshot;
   const list = document.querySelector('.queue-items-list');
   if (state.activeTab !== 'video') {
     const badge = document.querySelector('[data-tab="video"] .tab-badge');
@@ -477,16 +507,17 @@ function applyTasks(tasks) {
     render();
     return;
   }
-  for (const task of state.tasks) {
-    const card = [...list.querySelectorAll('[data-task-id]')].find(card => card.dataset.taskId === String(task.id));
+  const cards=new Map([...list.querySelectorAll('[data-task-id]')].map(card=>[card.dataset.taskId,card]));
+  for (const task of visible) {
+    const card = cards.get(String(task.id));
     if (!card) { render(); return; }
     const progress = Math.min(100, Math.round(task.progress || 0));
     const bar = card.querySelector('[data-role="bar"]');
-    if (bar) bar.style.width = `${progress}%`;
+    if (bar && bar.style.width!==`${progress}%`) bar.style.width = `${progress}%`;
     const nums = card.querySelector('[data-role="nums"]');
-    if (nums) nums.innerHTML = taskProgressNumsHtml(task);
+    if (nums) {const html=taskProgressNumsHtml(task);if(progressMarkup.get(nums)!==html){nums.innerHTML=html;progressMarkup.set(nums,html);}}
     const st = card.querySelector('[data-role="status"]');
-    if (st) st.textContent = taskStatusLabel(task);
+    if (st && st.textContent!==taskStatusLabel(task)) st.textContent = taskStatusLabel(task);
   }
 }
 
@@ -554,7 +585,7 @@ function render({resetProfileScroll=false}={}) {
       </nav>
 
       <!-- Tab Content Area -->
-      <div class="popup-scroll tab-${state.activeTab}" data-view="${state.activeTab}">
+      <div class="popup-scroll tab-${state.activeTab}" data-view="${state.activeTab}" tabindex="0" role="region" aria-label="${state.activeTab==='video'?'Downloads':state.activeTab==='profile'?'Library':state.activeTab==='settings'?'Settings':'History'} content">
         ${renderTabContent()}
       </div>
       ${popupSurface.surface==='popup'?`<button class="popup-resize-handle" id="btn-resize-popup" aria-label="Resize popup. Drag the corner or use arrow keys." title="Resize popup (up to 800 × 600)">${icon('maximize-2')}</button>`:''}
@@ -562,9 +593,10 @@ function render({resetProfileScroll=false}={}) {
   `;
 
   bindEvents();
+  liquidWorkspace.bind();
   popupSurface.bindResize(document.getElementById('btn-resize-popup'));
   bindThumbnailFallbacks();
-  updateProfileSelection();
+  if(state.activeTab==='profile')updateProfileSelection();
   updateBatchControls();
   const scroller = document.querySelector('.popup-scroll');
   if (scroller) scroller.scrollTop = state.activeTab==='profile'?0:state.viewScroll[state.activeTab] || 0;
@@ -593,6 +625,8 @@ function renderVideoQueueTab() {
   const downloadingCount = state.tasks.filter(t => t.status === 'downloading').length;
   const queuedCount = state.tasks.filter(t => t.status === 'queued').length;
   const erroredCount = state.tasks.filter(t => t.status === 'error').length;
+  const visibleTasks=visibleQueueTasks(),start=state.queuePage*queuePageSize;
+  const queuedUrls=new Set(state.tasks.filter(task=>task.status!=='error').map(task=>task.url));
 
   return `
     <!-- Current Video Detection -->
@@ -619,7 +653,7 @@ function renderVideoQueueTab() {
         <div class="download-format-options">${outputFormatControl('download-output-format')}<p class="download-format-hint">${state.outputFormat==='mp4'?'Compatible HLS converts during download without losing quality. WebM and unsupported codecs keep their original format.':'Save the original format without conversion.'}</p></div>
         <div class="qualities-list">
           ${state.detectedVideos.map((video, idx) => {
-            const isAlreadyQueued = state.tasks.some(task => task.url === video.videoUrl && task.status !== 'error');
+            const isAlreadyQueued = queuedUrls.has(video.videoUrl);
             const qualDisplay = Array.isArray(video.quality) ? video.quality[0] : (video.quality || 'Auto');
             const fmtDisplay = normalizeFormat(video.format, video.videoUrl);
             const heading=(video.site==='x' || video.site==='missav') && (!idx || state.detectedVideos[idx-1].pageUrl!==video.pageUrl)
@@ -667,8 +701,9 @@ function renderVideoQueueTab() {
       </div>
 
       ${state.tasks.length ? `
+        ${state.tasks.length>queuePageSize?`<nav class="queue-pagination" aria-label="Download queue pages"><button class="btn-page" id="queue-prev" aria-label="Previous downloads" ${state.queuePage===0?'disabled':''}>${icon('chevron-left')}</button><span>Showing ${start+1}–${Math.min(start+queuePageSize,state.tasks.length)} of ${state.tasks.length}</span><button class="btn-page" id="queue-next" aria-label="Next downloads" ${start+queuePageSize>=state.tasks.length?'disabled':''}>${icon('chevron-right')}</button></nav>`:''}
         <div class="queue-items-list">
-          ${state.tasks.map(task => {
+          ${visibleTasks.map(task => {
             const isDownloading = task.status === 'downloading';
             const isPaused = task.status === 'paused';
             const isError = task.status === 'error';
@@ -836,6 +871,17 @@ function renderSettingsTab() {
 
 // Bind DOM Events
 function bindEvents() {
+  const profileScroll=document.querySelector('.popup-scroll.tab-profile');
+  profileScroll?.addEventListener('wheel',event=>{
+    const grid=profileScroll.querySelector('.profile-video-grid');
+    if(!grid || !event.deltaY || event.ctrlKey || grid.contains(event.target) || event.target.closest?.('select,textarea,[contenteditable="true"]'))return;
+    for(let node=event.target;node && node!==profileScroll;node=node.parentElement){
+      if(node.scrollHeight>node.clientHeight && /^(auto|scroll)$/.test(getComputedStyle(node).overflowY))return;
+    }
+    const delta=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?grid.clientHeight:1);
+    if(delta<0 && grid.scrollTop<=0 || delta>0 && grid.scrollTop+grid.clientHeight>=grid.scrollHeight-1)return;
+    grid.scrollTop+=delta;event.preventDefault();
+  },{passive:false});
   document.getElementById('btn-open-browser-tab')?.addEventListener('click',async()=>{
     try{await chrome.tabs.create({url:chrome.runtime.getURL('src/pages/popup/index.html?surface=tab'),active:true});}
     catch(error){showToast(error.message,'error');}
@@ -883,6 +929,9 @@ function bindEvents() {
   document.querySelector('#history-search')?.addEventListener('input',event=>{state.historyQuery=event.target.value;state.historyPage=0;render();});
   document.querySelector('#history-prev')?.addEventListener('click',()=>{state.historyPage--;render();});
   document.querySelector('#history-next')?.addEventListener('click',()=>{state.historyPage++;render();});
+  for(const [id,delta] of [['queue-prev',-1],['queue-next',1]])document.getElementById(id)?.addEventListener('click',()=>{
+    state.queuePage+=delta;render();document.querySelector('.queue-section')?.scrollIntoView({block:'start'});
+  });
   document.querySelectorAll('[data-history-action]').forEach(button=>button.addEventListener('click',async()=>{
     const record=state.history.find(record=>record.id===button.dataset.id);if(!record)return;
     try{
@@ -1163,9 +1212,6 @@ async function init() {
 
   // Direct storage listener + polling fallback so progress always updates live
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.downloadQueueState?.newValue) {
-      applyTasks(changes.downloadQueueState.newValue.tasks || []);
-    }
     if (area === 'local' && changes.profileScanState) applyProfileScan(changes.profileScanState.newValue);
     if (area === 'local' && changes.profileSelectionState) applySavedSelection(changes.profileSelectionState.newValue);
     if (area === 'local' && changes.profileBatchState) applyProfileBatch(changes.profileBatchState.newValue);
@@ -1179,7 +1225,7 @@ async function init() {
         applyTasks(tasks);
       }
     } catch (e) {}
-  }, 800);
+  }, 2000);
 
   const hist = await historyStorage.get();
   if (hist?.records) {

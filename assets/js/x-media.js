@@ -1,3 +1,5 @@
+import {expandHlsChoices} from './hls-playlist.js';
+
 // X post metadata is shared by page detection and background link renewal.
 export function isXPage(value) {
   try { const url=new URL(value); return /^https?:$/.test(url.protocol) && /^(?:(?:www|m|mobile)\.)?(?:x|twitter)\.com$/i.test(url.hostname); }
@@ -74,4 +76,8 @@ export async function fetchXMedia(pageUrl,fetchText) {
   const videos=extractXMedia(payload,pageUrl);
   if(!videos.length)throw Error('No downloadable X video is available. Open the post on X, play the video, then refresh video detection.');
   return videos;
+}
+
+export function expandXPlaylist(video,fetchText) {
+  return expandHlsChoices(video,fetchText,url=>/\.m3u8(?:[?#]|$)/i.test(xMediaUrl(url)));
 }

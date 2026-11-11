@@ -13,9 +13,11 @@ const card=(id,style='')=>`<div class="thumbnail group" id="card-${id}" style="w
     context.on('page',page=>page.on('pageerror',error=>errors.push(error.message)));
     await context.route('**/*',async route=>{
       const url=new URL(route.request().url());requests.push(url.href);
-      const headers={'access-control-allow-origin':'https://missav.ws','access-control-allow-credentials':'true'};
+      const corsOrigin=route.request().headers().origin==='https://missav123.com'?'https://missav123.com':'https://missav.ws';
+      const headers={'access-control-allow-origin':corsOrigin,'access-control-allow-credentials':'true'};
       if(url.hostname==='images.test')return route.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aU1cAAAAASUVORK5CYII=','base64')});
       if(url.href===catalogue)return route.fulfill({contentType:'text/html',body:`<!doctype html><title>MissAV catalogue</title><style>body{margin:0}.preview{display:none}</style>${card(101)}<div style="height:1000px"></div>${card(102)}${card(104,'display:none')}<div style="height:1000px"></div>`});
+      if(url.hostname==='missav123.com' && url.pathname==='/dm36/en/juq-045')return route.fulfill({contentType:'text/html',body:player(first,'Fixture video')+'<div class="thumbnail" style="width:320px;height:120px"><a href="/en/juq-045">Same video</a></div>'});
       if(url.pathname==='/en/sample-101')return route.fulfill({contentType:'text/html',body:player(first,'Sample 101')});
       if(url.pathname==='/en/sample-102')return route.fulfill({contentType:'text/html',body:player(second,'Sample 102')});
       if(url.pathname==='/en/sample-103')return route.fulfill({status:403,contentType:'text/html',body:'<title>Just a moment...</title><div class="cf-chl-container"></div>'});
@@ -28,6 +30,7 @@ const card=(id,style='')=>`<div class="thumbnail group" id="card-${id}" style="w
       window.chrome={runtime:{id:'missav-test',onMessage:{addListener:fn=>runtimeListeners.push(fn)},sendMessage:async message=>{messages.push(message);return message.type==='ext-fetch-text'?{ok:false,error:'HTTP 403'}:{success:true};}}};
     });
     const page=await context.newPage();await page.goto(catalogue);
+    await page.addStyleTag({url:'https://missav.ws/assets/css/player-download.css'});
     await page.evaluate(async()=>{const {installMediaDetection}=await import('/assets/js/media-detection.js');installMediaDetection();});
     const waitVideo=id=>page.waitForFunction(value=>{
       const report=messages.filter(message=>message.type==='media-detection-report').at(-1);
@@ -36,6 +39,13 @@ const card=(id,style='')=>`<div class="thumbnail group" id="card-${id}" style="w
     await waitVideo(101);
     assert.equal(requests.some(url=>url.includes('preview.mp4')),false,'a catalogue preview must never be fetched as the full video');
     assert.equal(requests.some(url=>url.endsWith('/en/sample-102')),false,'offscreen cards are not fetched');
+    const cardButton=page.locator('#card-101 .mediaflow-download');
+    await cardButton.hover();await page.locator('#card-101 .mediaflow-download-quality').click();
+    await page.getByRole('button',{name:'720p HLS',exact:true}).click();await cardButton.click();
+    await page.waitForFunction(()=>messages.some(message=>message.type==='download-queue-enqueue'));
+    const cardDownload=await page.evaluate(()=>messages.find(message=>message.type==='download-queue-enqueue'));
+    assert.equal(cardDownload.url,`https://surrit.com/${first}/720p/video.m3u8`);
+    assert.equal(cardDownload.pageUrl,'https://missav.ws/en/sample-101');
     await page.evaluate(()=>scrollTo(0,600));
     await page.waitForFunction(()=>messages.filter(message=>message.type==='media-detection-report').at(-1)?.videoInfos.length===0);
     await page.evaluate(()=>scrollTo(0,1260));await waitVideo(102);
@@ -71,9 +81,29 @@ const card=(id,style='')=>`<div class="thumbnail group" id="card-${id}" style="w
     assert.equal(queued.url,`https://surrit.com/${second}/1080p/video.m3u8`);assert.equal(queued.pageUrl,'https://missav.ws/en/sample-102');assert.equal(queued.format,'m3u8');assert.equal(queued.title,'Sample 102');
     fs.mkdirSync(path.join(root,'test-results'),{recursive:true});await popup.screenshot({path:path.join(root,'test-results/missav-popup.png'),fullPage:true});
     await page.goto('https://missav.ws/en/sample-101');
+    await page.addStyleTag({url:'https://missav.ws/assets/css/player-download.css'});
     await page.evaluate(async()=>{const {installMediaDetection}=await import('/assets/js/media-detection.js');installMediaDetection();});
     await waitVideo(101);
+    await page.locator('.mediaflow-download').waitFor();
+    // Exercise the reported domain and exact route through the player control.
+    const actual='https://missav123.com/dm36/en/juq-045';
+    await page.goto(actual);
+    await page.addStyleTag({url:'https://missav123.com/assets/css/player-download.css'});
+    await page.evaluate(async()=>{const {installMediaDetection}=await import('/assets/js/media-detection.js');installMediaDetection();});
+    await page.waitForFunction(url=>{
+      const report=messages.filter(message=>message.type==='media-detection-report').at(-1);
+      return report?.site==='missav' && report.pageUrl===url && report.videoInfos.length===2 && report.videoInfos.every(video=>video.pageUrl===url);
+    },actual);
+    const aliasVideos=await page.evaluate(()=>messages.filter(message=>message.type==='media-detection-report').at(-1).videoInfos);
+    assert.equal(requests.some(url=>url==='https://missav123.com/en/juq-045'),false,'a duplicate card without the dm prefix must not trigger a second resolution');
+    assert.ok(aliasVideos.every(video=>video.headers.Referer===actual && video.headers.Origin==='https://missav123.com'));
+    await page.locator('.mediaflow-download').hover();await page.locator('.mediaflow-download-quality').click();
+    await page.getByRole('button',{name:'1080p HLS',exact:true}).click();await page.locator('.mediaflow-download').click();
+    await page.waitForFunction(()=>messages.some(message=>message.type==='download-queue-enqueue'));
+    const aliasDownload=await page.evaluate(()=>messages.find(message=>message.type==='download-queue-enqueue'));
+    assert.equal(aliasDownload.pageUrl,actual);assert.equal(aliasDownload.headers.Referer,actual);
+    assert.equal(aliasDownload.url,`https://surrit.com/${first}/1080p/video.m3u8`);
     assert.deepEqual(errors,[]);
-    console.log('PASS: MissAV catalogue viewport detection, full-video sources, scroll updates, packed player parsing, HLS qualities, verification handling and popup enqueue.');
+    console.log('PASS: MissAV catalogue and missav123 dm-prefixed player detection, quality selection, request headers, verification handling and queue submission.');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

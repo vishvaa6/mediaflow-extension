@@ -45,6 +45,13 @@ export function parseProfileDocument(doc, baseUrl) {
   const root = creatorRoot(baseUrl);
   const absolute = value => httpUrl(value, baseUrl);
   const clean = text => String(text || '').replace(/\s+/g, ' ').trim();
+  const pageText = node => {
+    if(!node || node.closest?.('.mediaflow-download-status,.mediaflow-pick-tick'))return '';
+    if(!node.querySelector?.('.mediaflow-download-status,.mediaflow-pick-tick'))return node.textContent;
+    const walker=doc.createTreeWalker(node,4);let text='',part;
+    while((part=walker.nextNode()))if(!part.parentElement?.closest('.mediaflow-download-status,.mediaflow-pick-tick'))text+=part.textContent;
+    return text;
+  };
   const imageUrls = img => {
     if (!img) return [];
     const values = ['data-thumb_url', 'data-thumb-url', 'data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-poster', 'src'].map(a => img.getAttribute(a));
@@ -61,8 +68,9 @@ export function parseProfileDocument(doc, baseUrl) {
     const id = parsed.searchParams.get('viewkey') || parsed.pathname.replace(/\/$/, '');
     const img = card.querySelector('img') || link.querySelector('img');
     const titleEl = card.querySelector('.title a, a.title, .videoTitle, [data-title]');
-    const titleText=titleEl?.querySelector('h2,h3,span:not(.duration)')?.textContent || titleEl?.textContent;
-    const titleCandidates=[titleEl?.getAttribute('title'),titleEl?.getAttribute('data-title'),titleText,...[...card.querySelectorAll('a[title],a[href]')].map(node=>node.getAttribute('title')),img?.getAttribute('alt'),...[...card.querySelectorAll('a[href]')].map(node=>node.textContent),link.getAttribute('title'),link.textContent].map(clean);
+    const titleChild=[...(titleEl?.querySelectorAll('h2,h3,span:not(.duration)') || [])].find(node=>!node.closest('.mediaflow-download-status,.mediaflow-pick-tick'));
+    const titleText=pageText(titleChild) || pageText(titleEl);
+    const titleCandidates=[titleEl?.getAttribute('title'),titleEl?.getAttribute('data-title'),titleText,...[...card.querySelectorAll('a[title],a[href]')].map(node=>node.getAttribute('title')),img?.getAttribute('alt'),...[...card.querySelectorAll('a[href]')].map(pageText),link.getAttribute('title'),pageText(link)].map(clean);
     const title=titleCandidates.find(value=>value && !/^(?:\d+:){1,2}\d+(?:\s+\S+)?$/.test(value) && !/^(?:select|selected|downloaded|not downloaded)$/i.test(value)) || '';
     const thumbnails = imageUrls(img);
     const item = {id, url, title: title || `Video ${id}`, thumbnail: thumbnails[0] || '', thumbnails,

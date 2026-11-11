@@ -2,7 +2,7 @@ import {decodeMediaText} from './media-extraction.js';
 import {parsePlaylist} from './hls-playlist.js';
 
 export function isMissavPage(value){
-  try{const url=new URL(value);return /^https?:$/.test(url.protocol) && /^(?:www\.)?missav\.(?:ws|live|com|ai)$/i.test(url.hostname);}catch{return false;}
+  try{const url=new URL(value);return /^https?:$/.test(url.protocol) && !url.username && !url.password && /^(?:www\.)?(?:missav\.(?:ws|live|com|ai)|missav123\.com)$/i.test(url.hostname);}catch{return false;}
 }
 export function missavVideoPage(value,base){
   try{
@@ -10,7 +10,9 @@ export function missavVideoPage(value,base){
     if(!isMissavPage(url.href))return '';
     const match=url.pathname.match(/^\/(?:dm\d+\/)?(en|ja|cn|zh|ko|ms|th|de|fr|vi|id|fil|pt)\/([a-z0-9][a-z0-9_-]*)\/?$/i);
     if(!match || !/\d/.test(match[2]) || /^(?:fc2|1pondo|10musume)$/i.test(match[2]))return '';
-    return `${url.origin}/${match[1]}/${match[2]}`;
+    // Keep the site's routing prefix for fetching, Referer, and later renewal.
+    // videoKey() deduplicates the same video across prefixes and aliases.
+    return `${url.origin}${url.pathname.replace(/\/$/,'')}`;
   }catch{return '';}
 }
 export function missavMediaUrl(value,base){

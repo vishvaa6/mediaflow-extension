@@ -1,6 +1,7 @@
 import {needsSourceRefresh,httpError,retain474OnMissingSource} from './source-refresh.js';
 import {exactRequestCondition} from './media-headers.js';
 import {waitForData,networkError,retryAfterMs} from './network.js';
+import {assertMediaResponse} from './media-response.js';
 
 // Streaming downloads commit the partial OPFS file before acknowledging a pause.
 export class DirectDownloader {
@@ -37,7 +38,29 @@ export class DirectDownloader {
     if (offset) requestHeaders.set('Range',`bytes=${start}-`);
     const response = await this.waitForNetwork(this.fetcher(url,{headers:requestHeaders,credentials:'include',cache:'no-store',signal:this.abortController.signal}));
     if (!response.ok) { await response.body?.cancel(); throw Object.assign(httpError(response.status),{code:'HTTP',retryAfter:retryAfterMs(response.headers.get('Retry-After'))}); }
-    return response;
+    let reader;
+    try {
+      reader = response.body?.getReader();
+      if (!reader) throw Object.assign(Error('The server returned no readable video data'),{code:'NETWORK'});
+      const prefix=[]; let prefixLength=0;
+      // Read a bounded prefix before opening an OPFS writer. Some challenge
+      // pages use application/octet-stream and arrive in multiple chunks.
+      if (start === 0 || response.status !== 206) {
+        while (prefixLength < 512) {
+          const part=await this.waitForNetwork(reader.read());
+          if (part.done) break;
+          prefix.push(part.value); prefixLength+=part.value.length;
+        }
+        const sample=new Uint8Array(Math.min(prefixLength,1024));let position=0;
+        for(const chunk of prefix){const length=Math.min(chunk.length,sample.length-position);sample.set(chunk.subarray(0,length),position);position+=length;if(position===sample.length)break;}
+        assertMediaResponse(sample);
+      }
+      return {response,reader,prefix};
+    } catch (error) {
+      if (reader) await reader.cancel().catch(()=>{});
+      else await response.body?.cancel().catch(()=>{});
+      throw error;
+    }
   }
   check() {
     if (this.pauseRequested || this.destroyed || this.abortController.signal.aborted) throw this.abortController.signal.reason || new DOMException('Paused','AbortError');
@@ -58,11 +81,15 @@ export class DirectDownloader {
       // Verify a small overlap before opening a writer. Signed URL renewal can
       // return another encoding even with the same quality label.
       const requestStart = Math.max(0,offset-65536);
-      let response;
-      try { response = await this.openResponse(url,headers,requestStart,offset); }
+      let response, prefix;
+      const open = async () => {const result=await this.openResponse(url,headers,requestStart,offset);response=result.response;reader=result.reader;prefix=result.prefix;};
+      try { await open(); }
       catch (error) {
         if (!needsSourceRefresh(error)) throw error;
-        if (!this.resolveSource) throw Object.assign(Error(`${error.message}. Open the original video page and retry. Cached data was kept.`),{code:error.code,status:error.status,retryAfter:error.retryAfter});
+        if (!this.resolveSource) {
+          if (error.code === 'INVALID_MEDIA_RESPONSE') throw error;
+          throw Object.assign(Error(`${error.message}. Open the original video page and retry. Cached data was kept.`),{code:error.code,status:error.status,retryAfter:error.retryAfter});
+        }
         try {
           const source = await this.waitForNetwork(this.resolveSource(this.abortController.signal));
           this.check();
@@ -70,24 +97,24 @@ export class DirectDownloader {
           if (!refreshed?.url || (refreshed.format && refreshed.format !== format)) throw Error('The original video format is unavailable');
           url = refreshed.url;
           headers = refreshed.headers || headers;
+          await open();
           await this.onSourceRefreshed?.({...refreshed,url,headers});
           this.check();
-          response = await this.openResponse(url,headers,requestStart,offset);
         } catch (refreshError) {
           refreshError=retain474OnMissingSource(error,refreshError);
           throw Object.assign(Error(`${error.message}. Link refresh failed: ${refreshError.message}. Cached data was kept; retry to continue.`),{code:refreshError.code,status:refreshError.status,retryAfter:refreshError.retryAfter});
         }
       }
-      if (this.pauseRequested || this.destroyed) { await response.body?.cancel(); return; }
+      if (this.pauseRequested || this.destroyed) { await reader?.cancel(); return; }
       const range = response.headers.get('Content-Range') || '';
       if (response.status === 206) {
         const rangeStart = range.match(/^bytes\s+(\d+)-/i)?.[1];
         if (rangeStart === undefined || Number(rangeStart) !== requestStart) {
-          await response.body?.cancel();
+          await reader?.cancel();
           throw Error('Server returned an invalid resume range. Cached data was kept.');
         }
       } else if (offset) {
-        await response.body?.cancel();
+        await reader?.cancel();
         throw Error('The server did not honor the resume range. Cached data was kept; retry later.');
       }
       const rangeTotal = Number(range.match(/\/(\d+)$/)?.[1]) || 0;
@@ -95,16 +122,15 @@ export class DirectDownloader {
       const total = rangeTotal || (length ? length+requestStart : 0);
       const expectedTotal = Number(totalBytes) || this.knownTotal || 0;
       if (offset && total && (total < offset || (expectedTotal && total !== expectedTotal))) {
-        await response.body?.cancel();
+        await reader?.cancel();
         throw Error('The refreshed video size changed. Cached data was kept to avoid corrupting the download.');
       }
-      reader = response.body?.getReader();
-      if (!reader) throw Error('The server returned no readable video data');
+      const read=()=>prefix.length ? Promise.resolve({done:false,value:prefix.shift()}) : this.waitForNetwork(reader.read());
       const overlap = new Uint8Array(await cached.slice(requestStart,offset).arrayBuffer());
       let verified = 0, remainder;
       while (verified < overlap.length) {
         this.check();
-        const {done,value} = await this.waitForNetwork(reader.read());
+        const {done,value} = await read();
         if (done) throw Error('The server returned incomplete resume data. Cached data was kept.');
         const count = Math.min(value.length,overlap.length-verified);
         for (let i=0;i<count;i++) if (value[i] !== overlap[verified+i]) throw Error('The refreshed video does not match the cached file. Cached data was kept.');
@@ -117,7 +143,7 @@ export class DirectDownloader {
       if (offset) await writer.seek(offset);
       onProgress?.({bytesReceived:offset, totalBytes:total, progress:total ? offset / total * 90 : 0, isFileDownloading:false});
       while (!this.pauseRequested && !this.destroyed) {
-        const {done, value} = remainder ? {done:false,value:remainder} : await this.waitForNetwork(reader.read());
+        const {done, value} = remainder ? {done:false,value:remainder} : await read();
         remainder = undefined;
         if (done) break;
         if (this.knownTotal && this.bytesReceived+value.byteLength > this.knownTotal) throw Error('The server returned too much data. Cached progress was kept.');
@@ -129,6 +155,7 @@ export class DirectDownloader {
       await writer.close();
       writer = null;
       if (this.pauseRequested || this.destroyed) return;
+      if (!this.bytesReceived) throw Object.assign(Error('The server returned an empty video. Retry when the video is available.'),{code:'NETWORK'});
       if (total && this.bytesReceived < total) throw Object.assign(Error('The connection ended before the complete file arrived. Resume to continue.'),{code:'NETWORK'});
       await this.finish({fileName, format, downloadSubdir, onProgress, onComplete});
     } catch (error) {

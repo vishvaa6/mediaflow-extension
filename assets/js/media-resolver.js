@@ -1,15 +1,16 @@
 import {extractMedia,decodeMediaText as decode,mediaHeight} from './media-extraction.js';
 import {siteDefinitions} from './site-media.js';
+import {expandXPlaylist} from './x-media.js';
+import {parsePlaylist} from './hls-playlist.js';
 export {extractMedia} from './media-extraction.js';
 function playlistVariants(text, baseUrl) {
-  const lines = text.split(/\r?\n/).map(line => line.trim()), variants = [];
-  for (let i=0;i<lines.length;i++) {
-    if (!lines[i].startsWith('#EXT-X-STREAM-INF:')) continue;
-    let next = i+1;
-    while (next<lines.length && (!lines[next] || lines[next].startsWith('#'))) next++;
-    if (next<lines.length) variants.push({format:'m3u8',quality:Number(lines[i].match(/RESOLUTION=\d+x(\d+)/i)?.[1]) || Number(lines[i].match(/NAME="?(\d+)/i)?.[1]) || 0,videoUrl:new URL(lines[next],baseUrl).href});
-  }
-  return variants;
+  const parsed=parsePlaylist(text,baseUrl);
+  if (!parsed.variants) return [];
+  // Passing a child playlist to the worker loses its master audio group.
+  // Only expose variants that contain their audio; if none qualify, keep the
+  // master so the downloader reports the unsupported separate track safely.
+  return parsed.variants.filter(variant=>!parsed.audioGroups.includes(variant.audio))
+    .map(variant=>({format:'m3u8',quality:variant.height,videoUrl:variant.url}));
 }
 const height = definition => mediaHeight(definition.quality);
 export function chooseDefinition(definitions, preference,{preferMp4=false}={}) {
@@ -18,7 +19,7 @@ export function chooseDefinition(definitions, preference,{preferMp4=false}={}) {
   const wanted = mediaHeight(preference);
   return wanted ? sorted.find(def => height(def) === wanted) || sorted.find(def => height(def) < wanted) || sorted[0] : sorted[0];
 }
-export async function resolveMedia(html,pageUrl,preference,fetchText,{format:requiredFormat,strictQuality=false,preferMp4=false} = {}) {
+export async function collectMediaSources(html,pageUrl,fetchText,requiredFormat) {
   const media = extractMedia(html), definitions = [];
   const site = await siteDefinitions(html,pageUrl,fetchText);
   for (const definition of [...site,...media.definitions]) {
@@ -33,10 +34,19 @@ export async function resolveMedia(html,pageUrl,preference,fetchText,{format:req
       } catch { /* Other definitions may still provide a working stream. */ }
     } else definitions.push({...definition,videoUrl:url,format});
   }
+  return {definitions,title:media.title};
+}
+
+export async function resolveMedia(html,pageUrl,preference,fetchText,{format:requiredFormat,strictQuality=false,preferMp4=false} = {}) {
+  const {definitions,title}=await collectMediaSources(html,pageUrl,fetchText,requiredFormat);
   const expanded = [];
   for (const definition of definitions) {
     if (definition.format === 'm3u8' && preference !== 'mp4') {
       try {
+        if (definition.site === 'x') {
+          expanded.push(...await expandXPlaylist(definition,fetchText));
+          continue;
+        }
         const variants = playlistVariants(await fetchText(definition.videoUrl,definition.headers || {Referer:pageUrl}),definition.videoUrl);
         expanded.push(...(variants.length ? variants.map(variant=>({...definition,...variant})) : [definition]));
       } catch { expanded.push(definition); }
@@ -49,7 +59,7 @@ export async function resolveMedia(html,pageUrl,preference,fetchText,{format:req
   if (!chosen) throw Error(preference === 'mp4' ? 'No MP4 stream is available for this video' : 'No supported video stream found');
   const videoUrl = new URL(decode(chosen.videoUrl),pageUrl).href;
   const quality = height(chosen);
-  return {title:chosen.title || media.title,url:videoUrl,format:chosen.format,quality:String(quality || 'Auto'),...(chosen.headers ? {headers:chosen.headers} : {})};
+  return {title:chosen.title || title,url:videoUrl,format:chosen.format,quality:String(quality || 'Auto'),...(chosen.headers ? {headers:chosen.headers} : {})};
 }
 
 export function safeFilePart(value) {

@@ -12,15 +12,22 @@ To create the release ZIP and checksum locally, run `python scripts/package_rele
 
 After changing the files, reload MediaFlow on the browser's Extensions page, then refresh the creator/video tab. Existing queue and history storage is preserved.
 
-## Windows desktop project
+If the extension is updated or reloaded while a video page is open, Chrome invalidates the old page connection. MediaFlow's player control shows **Refresh page** to reconnect; the page is refreshed only when you choose that action. Tabs already open before this recovery control was installed need one manual refresh first.
 
-The `desktop/` folder contains a Windows x64 WinUI application that hosts a browser and the bundled extension workspace in WebView2. On Windows, with a compatible .NET SDK and WebView2 runtime installed, build it from the repository root with:
+## Android app
+
+The `android/` project builds an Android 10 or newer app. Share a video link from another app using Android's share sheet and choose **MediaFlow**, or paste the link into MediaFlow and tap **Download link**. The download runs on the phone and is saved in **Downloads/MediaFlow**. The app displays its latest status and can open the completed file. Multiple submitted links are processed in order while the service remains running.
+
+The app reuses the extension's page and site resolver and downloads direct MP4/WebM and supported finite HLS streams. HLS is saved in its original TS or fragmented MP4 format. Separate audio tracks, DRM, live streams and fragmented MP4 with timeline discontinuities are not supported. Unlike the browser extension, the Android app does not currently resume interrupted transfers, convert HLS to conventional MP4, or use login cookies from other apps. Sites requiring sign-in or browser verification may fail; an error is shown rather than saving an access page as a video. Public X posts depend on X's public metadata endpoint. A shared page is resolved from the fetched page and supported site metadata, so dynamically loaded players may not be detected.
+
+Build with Android Studio, or with a compatible JDK, Android SDK 36 and Gradle installed:
 
 ```powershell
-dotnet build desktop/MediaFlow.Desktop.csproj -c Release
+cd android
+gradle assembleDebug
 ```
 
-The first build restores the Windows App SDK and Windows SDK build tools from NuGet. The desktop project is separate from the browser extension ZIP.
+The debug-signed APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. It is for local testing, not a store-signed release. Install it on the phone and allow installation from the source used to open the APK if Android asks.
 
 ## Attached popup and MP4 output
 
@@ -28,12 +35,14 @@ The first build restores the Windows App SDK and Windows SDK build tools from Nu
 - Click the toolbar icon to open MediaFlow attached to the browser toolbar. It opens at 720×600 by default. Drag the bottom-right grip to resize within Chrome's 800×600 popup limit; the popup size is remembered. Arrow keys resize the focused grip, and Home restores the default size. Smaller displays are respected. Use **Open full view in a browser tab** in the header for more space. MediaFlow does not open a separate window or resize the browser window. Detection follows the source website in the originating browser window.
 - **Library** gives loaded profile videos most of the popup height and keeps selection totals and Download visible at the bottom. Source setup collapses after a scan; click **Source** to change the URL, fetch again or clear results. Compact cards show readable titles, thumbnails and separate download status. The default 720×600 fixture library now shows ten full cards (eight when a batch summary or range hint is present), with two columns from 640px and three in the full browser tab from 1100px. **Search loaded videos** searches titles across all loaded pages without changing the library selection; the footer reminds you when selection includes hidden videos. Selection, page, scroll position and keyboard focus survive progress updates. Selected cards have rounded indigo borders. Poppins, Montserrat and Lucide SVG icons are bundled locally with their licenses.
 - **Downloads** shows a compact source preview and quality choices beside the queue from 640px wide, so transfer status stays in view. Narrow popups stack these panels. Queue rows keep pause, resume, retry, error details and progress together.
+- Large queues show 30 downloads at a time; use the queue's previous and next buttons to reach the rest. This keeps the popup responsive without changing the underlying downloads.
 - **Settings** groups Download behavior, Files and folders, and Display. Native switches support keyboard use and changes save automatically. **History** has a search toolbar, concise saved-file rows, file/source actions and expandable file details. The website's MediaFlow selection toolbar uses the same compact controls and grouped download actions.
 - **Download format** in Settings defaults to **MP4 preferred**. Native MP4 is preferred at the requested quality. Compatible H.264/AAC TS-based HLS and native fragmented HLS are finalized as conventional MP4 files with sample sizes, decode/composition timing, keyframe seek indexes and complete track durations. Encoded samples stream to disk without re-encoding. Unsupported TS/WebM conversion saves the original format with an explanation. An MP4 stream that cannot be finalized safely reports an error and retains its segments. **Original format** skips conversion. Retry rebuilds older converted output from retained segments; completed files downloaded before this fix need to be downloaded again.
 - Profile selections enter the queue before resolving their video pages. Resolution, transfer, conversion and final saving share the **Download limit** (0-12, default 6), available beside the Downloads queue and in Settings. **0 holds all downloads**. Lowering the limit suspends excess work, terminates its transfer workers and retains committed progress. Raising the limit resumes held tasks in queue order; manually paused tasks stay paused. Use a lower value to reduce RAM use. Repeating a creator batch skips its pending downloads.
 - **Queue limit** in Settings caps new waiting downloads separately from simultaneous downloads. The default, 0, is unlimited. A profile batch waits for space and resumes after a background restart; a single download reports when the queue is full. Existing tasks and downloads returned to the queue are kept even if they exceed a newly lowered limit.
 - Profile batch controls show not-yet-added, waiting, active, paused, completed and failed counts in the Library and website toolbar. **Pause batch** stops additions and pauses that batch's downloads; **Resume batch** leaves individually paused tasks alone. A paused batch stays paused across restarts and must be resumed or cancelled before another batch starts. **Retry failed** retries only its failed queue tasks using their retained cache. Completed counts use the batch's download-history records.
 - Transfers and conversion run in offscreen-owned workers, independently of the visible window and background service-worker lifetime. Queue recovery adopts existing workers. HLS segment checkpoints and direct partial files remain available for retry; interrupted conversion can restart from the retained source segments.
+- New HLS downloads begin fetching without probing for segment files before they exist, and progress updates use incremental counts rather than repeatedly scanning the playlist. Resume still checks committed segment files before fetching missing data. Actual transfer speed depends on the source server, connection, disk and simultaneous downloads.
 - The initial response and each period of inactivity have a 60-second timeout; a response that continues delivering data can take longer. Network interruptions, timeouts, HTTP 408/429/474 and 5xx failures are retried automatically with backoff up to two minutes and bounded Retry-After delays. Waiting retries release capacity, retain cached progress and survive background restarts; **Retry now** bypasses the delay. Pausing or cancelling stops retries. HTTP 474 is nonstandard, so retries cannot guarantee recovery if the server continues rejecting access. Expired media links are renewed without changing the checkpoint identity or requested quality/format.
 - **Downloaded** and **Not downloaded** badges appear on recognized website cards/players and extension views. They follow local completed-download history and supported URL aliases, update after navigation/history changes, and remain separate from selection. A task is marked downloaded only after the browser finishes saving it. Clearing history resets its badge; this does not check whether files were manually moved or deleted.
 
@@ -51,6 +60,8 @@ The v1.3.0 interface redesign follows the full-workspace audit and implementatio
 
 ## Repairs
 
+- Direct and HLS transfers reject clear login, verification and API error pages returned with HTTP 200 instead of saving them as videos. When the original page is available, MediaFlow tries to renew the source; otherwise it reports the access problem and retains committed data. Empty direct responses are retried rather than saved as completed videos.
+- HLS quality resolution keeps separate-audio information from the master playlist. It selects a compatible combined stream when available; if every variant requires a separate audio track, the download reports that limitation instead of silently producing video without sound.
 - Download speed uses numeric samples with a consistent B/s, KB/s or MB/s display.
 - Queue writes and task controls are serialized. Queued downloads can be paused. Resumes respect concurrency, and final saves use the browser's pause/resume controls. If a browser file save cannot resume, the app saves the committed cache again.
 - MP4/WebM pauses commit partial files before resuming. Resume verifies up to 64 KiB of overlap before appending, including after browser restarts. A changed file or a server ignoring Range reports an error and preserves the partial file. Stalled connections report an error.
@@ -79,6 +90,8 @@ MediaFlow automatically detects video and animated-GIF media visible in the view
 3. Choose an **MP4** quality and download. The existing queue, pause/resume, download subdirectory and history controls apply.
 4. Visible videos are grouped separately in the popup. Multi-video cards are matched by their poster so each download keeps the correct post/video identity. Opening a URL ending in `/video/2` is also supported.
 
+Each visible X video or animated GIF also has a small download button on its player. Hover over or focus it to expand the control, then open the chevron menu to see available MP4 and compatible HLS resolutions. Pick a quality and click the download icon. It defaults to the highest available MP4 quality (or HLS when no MP4 is available) and uses the saved output-format preference. The button shows queue errors, prevents duplicate queued downloads, and follows videos as the timeline changes.
+
 Detection reads video variants from responses already received by the X page and can fall back to X's public embed metadata. It does not require an API key. The observer forwards only post text, thumbnail and media URLs; it does not forward account credentials or request headers. Results follow scrolling, resize, DOM changes and navigation. Hidden, clipped and offscreen players are excluded. X and Twitter URL aliases share history identities, with a separate identity for each video in a post.
 
 MP4 is recommended because some X HLS streams use separate audio, which the existing downloader does not mux. Public metadata is also used to renew expired media URLs at the same quality and format. If the post is unavailable through that endpoint, retry reports an error and retains the committed cache. Media visible only while signed in depends on the original X page loading its variants. Profile-wide batch downloads and live broadcasts on X are not included.
@@ -87,7 +100,7 @@ The X regression and browser checks use synthetic API responses, including fetch
 
 ## MissAV catalogue and player detection
 
-MediaFlow supports the MissAV catalogue, individual video pages, and the existing MissAV domain aliases. Reload the extension and refresh an open MissAV tab after updating.
+MediaFlow supports the MissAV catalogue, individual video pages, and the existing MissAV domain aliases including `missav123.com`. The original `/dm…/` routing prefix is retained for player requests and link renewal. Reload the extension and refresh an open MissAV tab after updating.
 
 - Scroll catalogue thumbnails into view. MediaFlow resolves their full video pages automatically and groups each video's available HLS qualities in the popup. Preview/trailer MP4 clips are excluded.
 - On a video page, the visible main player is resolved from its page configuration. Packed source strings are decoded as data; page scripts are never evaluated by the extension. Known sources remain available if the master playlist cannot be expanded.
@@ -123,8 +136,11 @@ The tests use synthetic pages and video data. Account-specific pages, CAPTCHA re
 | MissAV | Catalogue viewport resolution, packed source assignments, actual HLS variants, player headers, preview filtering and verification handling |
 | Tangxin / Rou | Structured sources, cover-based source and HLS API |
 | Huangguo | Current-episode API with matching-episode fallback |
+| Huangdou | Visible-player bridge across configured domain aliases, including episode and URL validation |
 | Other sites | HTML5 video/source, JSON-LD, common player fields and observed playback resources |
 
 The existing Huangdou runtime player bridge is retained; generic frame detection supplements it. DRM, DASH/separate-track muxing, live HLS, CAPTCHA/access restrictions and sites with custom encrypted APIs are not universally supported. An HTTP 403 may still require a valid site session or playback on the original page. Cached downloads are preserved when access is denied.
+
+The in-page glass download button is available for each site family in the table. On supported watch pages it follows the main player, including the 123av embed. If the player is still loading or offscreen, look for **Download** in the lower-right corner of the page. Hover or focus the icon, open the quality menu, then click Download to queue the selected MP4, WebM or compatible HLS stream. Some custom players expose their sources only after playback starts.
 
 The current unfinished HLS segment may be fetched again after interruption; completed segments are retained. If refreshed playlist contents no longer match the checkpoint, the app reports the change and keeps the cache instead of restarting the download. Old downloads created before durable HLS checkpoints cannot recover segment metadata that was never saved. Existing browser file saves are recovered by download ID.

@@ -1,15 +1,17 @@
-import {videoKey,downloadedRecord} from './video-details.js';
+import {videoKey,createDownloadedLookup} from './video-details.js';
 
 export function selectionView(videos,selection,history = []) {
   const keys = videos.map(video => videoKey(video.url));
   const start = selection?.mode === 'range' ? keys.indexOf(selection.start) : -1;
   const end = selection?.mode === 'range' ? keys.indexOf(selection.end) : -1;
   const complete = selection?.mode !== 'range' || start >= 0 && end >= 0;
+  const excluded=new Set(selection?.excludedKeys || []);
   const wanted = selection?.mode === 'range'
     ? new Set(complete ? keys.slice(Math.min(start,end),Math.max(start,end)+1) : [selection.start].filter(Boolean))
-    : selection?.mode === 'manual' ? new Set(selection.keys) : new Set(keys.filter(key => !selection?.excludedKeys?.includes(key)));
-  const selected = videos.filter(video => wanted.has(videoKey(video.url)) && !downloadedRecord(history,video.url,video.videoUrl));
-  return {videos:selected,keys:new Set(selected.map(video => videoKey(video.url))),start,end,complete};
+    : selection?.mode === 'manual' ? new Set(selection.keys) : new Set(keys.filter(key => !excluded.has(key)));
+  const downloaded=createDownloadedLookup(history),selected=[],selectedKeys=new Set();
+  videos.forEach((video,index)=>{const key=keys[index];if(wanted.has(key) && !downloaded(video.url,video.videoUrl,key)){selected.push(video);selectedKeys.add(key);}});
+  return {videos:selected,keys:selectedKeys,start,end,complete};
 }
 
 export function changeSelection(previous,action,videos,history = []) {

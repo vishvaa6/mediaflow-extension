@@ -35,7 +35,9 @@ const server=http.createServer((req,res)=>{
     const send=()=>{res.setHeader('Content-Type','video/mp2t');res.end(fs.readFileSync(path.join(out,media[2])));};
     if(hold || media[1]==='5' && media[2]==='segment-1.ts' && holdFive){const job={res,send,id:media[1],token:url.searchParams.get('token')};held.add(job);res.on('close',()=>held.delete(job));}else send();return;
   }
-  if(url.pathname==='/original.webm'){count(url.pathname);res.setHeader('Content-Type','video/webm');res.end(fs.readFileSync(path.join(out,'fixture.webm')));return;}
+  if(url.pathname==='/original.webm' || url.pathname==='/recovered.webm'){count(url.pathname);res.setHeader('Content-Type','video/webm');res.end(fs.readFileSync(path.join(out,'fixture.webm')));return;}
+  if(url.pathname==='/challenge.webm' || url.pathname==='/challenge.mp4'){count(url.pathname);res.setHeader('Content-Type','application/octet-stream');res.end('<!doctype html><html><body>Sign in to continue</body></html>');return;}
+  if(url.pathname==='/watch/challenge'){count(url.pathname);res.setHeader('Content-Type','text/html');res.end('<video src="/recovered.webm" type="video/webm"></video>');return;}
   if(url.pathname==='/original.m3u8'){res.end('#EXTM3U\n#EXTINF:1,\noriginal.ts\n#EXT-X-ENDLIST');return;}
   if(url.pathname==='/original.ts'){res.setHeader('Content-Type','video/mp2t');res.end(fs.readFileSync(path.join(out,'original.ts')));return;}
   const file=path.resolve(root,'.'+decodeURIComponent(url.pathname));
@@ -190,8 +192,18 @@ async function createBackground(){
   await until(()=>retryEvents.some(task=>task.id===disconnected.id && task.errorStatus===474 && task.nextRetryAt>0),'HTTP 474 retry scheduled');
   await until(()=>values.m3u8DownloadHistory.records.some(record=>record.id===disconnected.id),'automatic HTTP 474 recovery');
   assert.ok(requests.get('/media/7/fixture.m3u8')>=5,'recovery retries the rejected playlist');
+  const bad=await dispatch(background,{type:'download-queue-enqueue',url:origin+'/challenge.mp4',format:'mp4',fileName:'Access required'},{id:'fixture'});
+  await until(()=>values.downloadQueueState.tasks.some(task=>task.id===bad.id && task.status==='error'),'HTTP 200 access page reports an error');
+  assert.match(values.downloadQueueState.tasks.find(task=>task.id===bad.id).error,/verification|sign-in/i);
+  assert.equal(values.m3u8DownloadHistory.records.some(record=>record.id===bad.id),false,'an access page is not a completed video');
+  const recovered=await dispatch(background,{type:'download-queue-enqueue',url:origin+'/challenge.webm',pageUrl:origin+'/watch/challenge',format:'webm',fileName:'Fresh source'},{id:'fixture'});
+  await until(()=>values.m3u8DownloadHistory.records.some(record=>record.id===recovered.id),'HTTP 200 access page renews to playable video');
+  assert.equal(requests.get('/challenge.webm'),1);assert.equal(requests.get('/watch/challenge'),1);
+  assert.deepEqual(fs.readFileSync(saved.at(-1).file),fs.readFileSync(path.join(out,'fixture.webm')));
+  const missingBlob=await dispatch(offscreen,{type:'OPFS_TO_BLOB_URL',filename:'missing-cache-file',mimeType:'video/mp4'},{id:'fixture'});
+  assert.equal(missingBlob.ok,false);assert.ok(missingBlob.error,'missing files must return a useful error without crashing the offscreen document');
   await until(()=>rules.size===0,'request header cleanup');
-  console.log('PASS: real offscreen workers; deferred profile resolution; concurrency=2; coordinator restart adoption; 503 retry; HLS renewal across worker replacement; H.264/AAC MP4 and discontinuity duration verified by ffprobe; playable WebM/TS fallback; failed-save retry from cache; header cleanup.');
+  console.log('PASS: real offscreen workers; deferred profile resolution; concurrency=2; coordinator restart adoption; 503 retry; HLS renewal across worker replacement; H.264/AAC MP4 and discontinuity duration verified by ffprobe; playable WebM/TS fallback; failed-save retry from cache; HTTP 200 access-page rejection and recovery; header cleanup.');
 })().catch(error=>{console.error(error);console.error(JSON.stringify({queue:values.downloadQueueState,requests:[...requests],saved},null,2));process.exitCode=1;}).finally(async()=>{
   await browser?.close();for(const job of held)job.res.destroy();await new Promise(resolve=>server.close(resolve));
 });
