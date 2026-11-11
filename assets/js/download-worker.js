@@ -4,8 +4,9 @@ import {resolveMedia} from './media-resolver.js';
 import {mediaHeaders} from './media-headers.js';
 import {isXPage} from './x-media.js';
 import {fetchBytes,errorData,restoreError,networkError} from './network.js';
+import {createProgressReporter} from './progress-reporter.js';
 
-let engine,task,controller,stopped=false,callId=0;
+let engine,task,controller,reporter,stopped=false,callId=0;
 const pending=new Map();
 const emit=(event,data={})=>postMessage({event,...data});
 function rpc(method,params){const id=++callId;return new Promise((resolve,reject)=>{pending.set(id,{resolve,reject});postMessage({rpc:true,id,method,params});});}
@@ -29,14 +30,16 @@ async function resolveSource(strict=false){
 }
 async function run(value){
   task=value;controller=new AbortController();stopped=false;
+  reporter=createProgressReporter(data=>emit('progress',{data}));
   try {
-    if(!task.url){emit('progress',{data:{phase:'resolving',progress:0}});if(!await resolveSource())return;}
+    if(!task.url){reporter.update({phase:'resolving',progress:0});if(!await resolveSource())return;}
     controller.signal.throwIfAborted();
     const hls=task.format==='m3u8';
-    const onProgress=data=>emit('progress',{data:{phase:'downloading',...data}});
-    const onFailure=error=>{if(!stopped)emit('error',{error:errorData(networkError(error))});};
+    const onProgress=data=>reporter.update({phase:'downloading',...data});
+    const onFailure=error=>{reporter.flush();if(!stopped)emit('error',{error:errorData(networkError(error))});};
     const saveFile=async output=>{
       controller.signal.throwIfAborted();
+      reporter.flush();
       emit('ready',{output:{...output,onProgress:undefined,outputExtension:output.format==='m3u8'?'ts':output.format}});
     };
     const renewal=task.pageUrl?()=>resolveSource(true):undefined;
@@ -51,13 +54,14 @@ async function run(value){
       const fallbackReason=task.outputFormat==='mp4' && task.format==='webm'?'MP4 is unavailable; saving the original WebM format.':undefined;
       await engine.start({...task,opfsFileName:task.opfsCacheFileName,onProgress:data=>onProgress({...data,outputExtension:task.format,outputCacheFileName:task.opfsCacheFileName,fallbackReason}),onFailure});
     }
-  }catch(error){if(!stopped)emit('error',{error:errorData(networkError(error))});}
+  }catch(error){reporter.flush();if(!stopped)emit('error',{error:errorData(networkError(error))});}
+  finally{reporter.flush();reporter.dispose();}
 }
 onmessage=async({data})=>{
   if(data.reply){const waiter=pending.get(data.id);pending.delete(data.id);if(waiter)data.error?waiter.reject(restoreError(data.error)):waiter.resolve(data.result);return;}
   if(data.command==='start'){run(data.task);return;}
   if(data.command==='pause'){
     stopped=true;controller?.abort(new DOMException('Paused','AbortError'));
-    await engine?.pauseSoft();emit('paused');
+    await engine?.pauseSoft();reporter?.flush();emit('paused');
   }
 };

@@ -74,6 +74,7 @@
       "run_at": "document_start",
       "matches": ["http://*/*", "https://*/*"],
       "all_frames": true,
+      "css": ["assets/css/player-download.css"],
       "js": ["src/pages/contentDetection/index.js"]
     }
   ],

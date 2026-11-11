@@ -7,7 +7,10 @@ export function visibleArea(node,view=window){
   for(let parent=node;parent;parent=parent.parentElement){
     const style=view.getComputedStyle(parent);
     if(style.display==='none' || style.visibility==='hidden' || style.visibility==='collapse' || Number(style.opacity)===0)return 0;
-    if(parent===node)continue;
+    // The document's scrolling root can report a viewport-sized rectangle
+    // shifted above the screen after scrolling. The viewport was already
+    // applied above; only clip against actual nested scroll containers.
+    if(parent===node || parent===node.ownerDocument.documentElement || parent===node.ownerDocument.scrollingElement)continue;
     const clip=parent.getBoundingClientRect();
     if(/hidden|clip|auto|scroll/.test(style.overflowX)){left=Math.max(left,clip.left);right=Math.min(right,clip.right);}
     if(/hidden|clip|auto|scroll/.test(style.overflowY)){top=Math.max(top,clip.top);bottom=Math.min(bottom,clip.bottom);}

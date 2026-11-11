@@ -6,8 +6,11 @@
   "scripts": {
     "test:media": "node --test tests/mp4-playback.test.mjs",
     "test:offscreen": "node tests/offscreen-browser.test.cjs",
+    "test:android-resolver": "node tests/android-resolver-browser.test.cjs",
+    "test:detection-performance": "node tests/detection-performance-browser.test.cjs",
+    "test:popup-performance": "node tests/popup-performance-browser.test.cjs",
     "test": "node --test tests/core.test.mjs tests/hls.test.mjs tests/site-compat.test.mjs tests/x.test.mjs tests/missav.test.mjs tests/reliability.test.mjs && node tests/background-smoke.mjs",
-    "test:browser": "node tests/browser.test.cjs && node tests/profile-selection-browser.test.cjs && node tests/hls-browser.test.cjs && node tests/x-browser.test.cjs && node tests/missav-browser.test.cjs && node tests/offscreen-browser.test.cjs"
+    "test:browser": "node tests/browser.test.cjs && node tests/profile-selection-browser.test.cjs && node tests/hls-browser.test.cjs && node tests/x-browser.test.cjs && node tests/missav-browser.test.cjs && node tests/site-player-browser.test.cjs && node tests/huangdou-browser.test.cjs && node tests/offscreen-browser.test.cjs"
   },
   "devDependencies": {
     "ui-skills": "0.2.4"

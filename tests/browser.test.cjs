@@ -7,8 +7,29 @@ const {chromium} = require(path.join(runtime,'playwright'));
 const root = path.resolve(__dirname,'..');
 const server = http.createServer((req,res) => {
   const requested = new URL(req.url,'http://localhost').pathname;
-  if(requested==='/generic-test' || requested==='/generic-frame'){
-    res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Generic video</title><video preload="none" src="/generic-'+(requested==='/generic-frame'?'frame.mp4':'top.webm')+'"></video>'+(requested==='/generic-test'?'<iframe src="/generic-frame"></iframe>':'')+'<script type="module">import {installMediaDetection} from "/assets/js/media-detection.js";installMediaDetection();</script>');return;
+  const genericPlayers={
+    '/generic-frame':'<video width="260" height="130" preload="none" src="/generic-frame.mp4"></video>',
+    '/generic-test':'<video width="260" height="130" preload="none" src="/generic-top.webm"></video><div id="hls-player"><video width="260" height="130" preload="none" src="/generic-master.m3u8"></video></div><iframe src="/generic-frame" width="300" height="170"></iframe>',
+    '/generic-blob':'<video width="260" height="130" preload="none" src="blob:unusable"></video><script type="application/ld+json">{"@type":"VideoObject","contentUrl":"/generic-full.mp4","height":720}</script>'
+  };
+  const videos=genericPlayers[requested];
+  if(videos){
+    res.setHeader('Content-Type','text/html');res.setHeader('Content-Security-Policy',"style-src 'self'");
+    res.end(`<!doctype html><title>Generic video</title><link rel="stylesheet" href="/assets/css/player-download.css">${videos}<script type="module">import {installMediaDetection} from "/assets/js/media-detection.js";installMediaDetection();</script>`);return;
+  }
+  if(requested==='/mgp-toolbar-test'){
+    res.setHeader('Content-Type','text/html');
+    res.end(`<!doctype html><title>Player toolbar</title><link rel="stylesheet" href="/assets/css/player-download.css">
+      <style>.mgp_player{position:relative;background:#15151a;width:100%;height:280px}.mgp_videoElement{width:100%;height:100%}
+      .mgp_controlsBar{display:flex;align-items:center;justify-content:flex-end;position:absolute;inset:auto 8px 8px;height:32px;gap:5px;transition:opacity .16s}
+      .mgp_controlsBar.controls-hidden{opacity:0}
+      .mgp_controlsBar>button{height:30px}</style>
+      <div class="mgp_player"><video class="mgp_videoElement" preload="none" src="blob:unusable"></video></div>
+      <video id="preview-other" width="140" height="80" preload="none" src="/preview.mp4"></video>
+      <template id="toolbar-template"><div class="mgp_controlsBar"><button id="autoplay-toggle" aria-label="Autoplay" aria-pressed="true">Auto</button><button class="mgp_nextBtn">Next</button><button>Settings</button></div></template>
+      <script>var flashvars_1={"mediaDefinitions":[{"format":"mp4","quality":480,"videoUrl":"/toolbar-480p.mp4"},{"format":"mp4","quality":720,"videoUrl":"/toolbar-720p.mp4"}]};
+      document.addEventListener('click',event=>{if(event.target.id==='autoplay-toggle')event.target.setAttribute('aria-pressed',String(event.target.getAttribute('aria-pressed')!=='true'));});</script>
+      <script type="module">import {installMediaDetection} from "/assets/js/media-detection.js";installMediaDetection();</script>`);return;
   }
   if (requested === '/thumb.png') { res.setHeader('Content-Type','image/svg+xml');res.end(fs.readFileSync(path.join(root,'tests/fixtures/library-thumb.svg')));return; }
   const file = path.resolve(root,'.'+decodeURIComponent(requested));
@@ -97,6 +118,13 @@ const server = http.createServer((req,res) => {
     assert.match(await page.locator('.task-speed-badge').innerText(),/2.0 MB\/s/);
     await page.evaluate(()=>testStorage.set({downloadQueueState:{tasks:[{id:'download-1',fileName:'Test download',status:'downloading',progress:30,downloadSpeed:4096}]}}));
     await page.waitForFunction(()=>document.querySelector('.task-speed-badge')?.textContent.includes('4.0 KB/s'));
+    await page.evaluate(async()=>{
+      window.originalQueueProgress=document.querySelector('[data-role="nums"]').firstElementChild;
+      const queue=(await testStorage.get('downloadQueueState')).downloadQueueState;
+      await testStorage.set({downloadQueueState:queue});
+    });
+    await page.waitForTimeout(250);
+    assert.equal(await page.evaluate(()=>window.originalQueueProgress===document.querySelector('[data-role="nums"]').firstElementChild),true,'duplicate queue updates must not rebuild progress nodes');
     await page.locator('[data-tab="profile"]').click();
     assert.equal(await page.locator('.profile-video-card').count(),60);
     assert.equal(await page.locator('.profile-video-card .already-downloaded:visible').count(),1);
@@ -307,6 +335,70 @@ const server = http.createServer((req,res) => {
     await frame.waitForFunction(()=>sentMessages.some(message=>message.type==='media-detection-report' && message.videoInfos.some(video=>video.format==='mp4')));
     const frameReport=await frame.evaluate(()=>sentMessages.find(message=>message.type==='media-detection-report' && message.videoInfos.length));
     assert.equal(frameReport.videoInfos[0].headers.Referer,origin+'/generic-frame');
+    const topButton=page.locator('body > .mediaflow-download-pill .mediaflow-download');
+    await topButton.click();
+    assert.equal(await page.evaluate(()=>sentMessages.find(message=>message.type==='download-queue-enqueue')?.url),origin+'/generic-top.webm');
+    await page.evaluate(()=>{
+      const send=chrome.runtime.sendMessage;
+      chrome.runtime.sendMessage=(message,...args)=>message.type==='ext-fetch-text' && message.url.endsWith('/generic-master.m3u8')
+        ? Promise.resolve({ok:true,text:'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=750000,RESOLUTION=854x480\ngeneric-480.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720\ngeneric-720.m3u8'})
+        : send(message,...args);
+    });
+    const hlsButton=page.locator('#hls-player .mediaflow-download');
+    await hlsButton.hover();await page.locator('#hls-player .mediaflow-download-quality').click();
+    await page.getByRole('button',{name:'480p HLS',exact:true}).click();await hlsButton.click();
+    const hlsDownload=await page.evaluate(()=>sentMessages.filter(message=>message.type==='download-queue-enqueue').at(-1));
+    assert.equal(hlsDownload.url,origin+'/generic-480.m3u8');assert.equal(hlsDownload.quality,'480');
+    await frame.locator('.mediaflow-download').click();
+    const frameDownload=await frame.evaluate(()=>sentMessages.find(message=>message.type==='download-queue-enqueue'));
+    assert.equal(frameDownload.url,origin+'/generic-frame.mp4');assert.equal(frameDownload.headers.Referer,origin+'/generic-frame');
+    await page.goto(origin+'/generic-blob');
+    await page.locator('.mediaflow-download').click();
+    await page.waitForFunction(()=>sentMessages.some(message=>message.type==='download-queue-enqueue'));
+    const blobDownload=await page.evaluate(()=>sentMessages.find(message=>message.type==='download-queue-enqueue'));
+    assert.equal(blobDownload.url,origin+'/generic-full.mp4');assert.equal(blobDownload.quality,'720');
+    await page.goto(origin+'/mgp-toolbar-test');
+    const floating=page.locator('.mgp_player > .mediaflow-download-pill[data-player-fallback]');
+    await floating.getByText('Download',{exact:true}).waitFor();
+    await floating.locator('.mediaflow-download').hover();
+    await floating.locator('.mediaflow-download-quality').click();
+    const choices=page.getByRole('group',{name:'Available video qualities'});
+    await choices.getByRole('button',{name:'480p MP4'}).waitFor();
+    assert.deepEqual((await choices.getByRole('button').allTextContents()).map(text=>text.trim()),['720p MP4','480p MP4']);
+    await page.evaluate(()=>document.querySelector('.mgp_player').append(document.querySelector('#toolbar-template').content.cloneNode(true)));
+    await choices.getByRole('button',{name:'480p MP4'}).click();
+    await page.mouse.click(18,18);
+    const docked=page.locator('.mgp_controlsBar > .mediaflow-download-pill');
+    const autoplay=page.locator('#autoplay-toggle');
+    await docked.waitFor();
+    assert.equal(await autoplay.evaluate(node=>node.previousElementSibling.matches('.mediaflow-download-pill[data-toolbar]')),true);
+    await docked.locator('.mediaflow-download').hover();
+    const [dockRect,autoRect]=await Promise.all([docked.boundingBox(),autoplay.boundingBox()]);
+    assert.ok(dockRect.x+dockRect.width<=autoRect.x && Math.abs(dockRect.y-autoRect.y)<2,'the expanded control sits beside Autoplay');
+    await autoplay.click();
+    assert.equal(await autoplay.getAttribute('aria-pressed'),'false','the site toggle remains clickable');
+    await docked.locator('.mediaflow-download').hover();
+    await docked.locator('.mediaflow-download-quality').click();
+    await choices.getByRole('button',{name:'480p MP4',pressed:true}).waitFor();
+    await page.evaluate(()=>document.querySelector('.mgp_controlsBar').classList.add('controls-hidden'));
+    await floating.getByText('Download',{exact:true}).waitFor();
+    assert.equal(await docked.count(),0,'the extension button must remain visible when the native controls fade out');
+    await choices.getByRole('button',{name:'480p MP4',pressed:true}).waitFor();
+    await page.keyboard.press('Escape');
+    await page.mouse.click(18,18);
+    await page.evaluate(()=>document.querySelector('.mgp_controlsBar').classList.remove('controls-hidden'));
+    await docked.waitFor();
+    await page.evaluate(()=>{
+      const toolbar=document.querySelector('.mgp_controlsBar'),replacement=toolbar.cloneNode(true);
+      replacement.querySelector('#autoplay-toggle').removeAttribute('aria-label');
+      replacement.querySelector('#autoplay-toggle').id='auto';
+      toolbar.replaceWith(replacement);
+    });
+    await page.waitForFunction(()=>document.querySelector('.mgp_nextBtn').previousElementSibling.matches('.mediaflow-download-pill[data-toolbar]') && document.querySelectorAll('.mediaflow-download-pill').length===1);
+    await docked.locator('.mediaflow-download').click();
+    await page.waitForFunction(()=>sentMessages.some(message=>message.type==='download-queue-enqueue'));
+    const toolbarDownload=await page.evaluate(()=>sentMessages.find(message=>message.type==='download-queue-enqueue'));
+    assert.equal(toolbarDownload.url,origin+'/toolbar-480p.mp4');assert.equal(toolbarDownload.quality,'480');
     assert.deepEqual(errors,[]);
     console.log('PASS: attached toolbar popup, cursor/keyboard resize and saved size, browser-tab full view, no browser-window mutation; quality/history/settings/profile controls; player headers; generic top-level/frame detection.');
   } finally { await browser.close(); }

@@ -1,0 +1,15 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.mediaflow.app'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'com.mediaflow.app'
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+    sourceSets.main.assets.srcDirs += ['../../assets/js']
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}

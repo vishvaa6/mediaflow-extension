@@ -30,6 +30,25 @@ export async function installProfilePageSelector() {
     button[aria-pressed=true]{border-color:#818cf8;color:#c7d2fe;background:#252e4b}
     #error{color:#fda4af;margin:8px 0 0;font-size:10px;overflow-wrap:anywhere}#cancel{flex-basis:100%;background:transparent;border-color:#7f4047;color:#fda4af;font-size:10px}
     #close{display:grid;place-items:center;width:26px;height:26px;min-height:26px;padding:4px;background:transparent}
+    /* Regular glass over arbitrary page content: enough tint for readable labels. */
+    :host{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1c1c1e;--panel:#f5f5f7e6;--panel-solid:#f5f5f7;--line:#3c3c4326;--secondary:#575760;--fill:#76768014;--accent:#0066d6;--danger:#c92c31;color-scheme:light}
+    section{background:var(--panel);border:1px solid #ffffff80;border-radius:24px;padding:14px;backdrop-filter:blur(28px) saturate(150%);box-shadow:inset 0 1px 0 #ffffff99,0 8px 32px #0003,0 0 0 1px #0000000d}
+    .toolbar-brand>.mf-icon{background:var(--fill);border-radius:50%;color:var(--accent)}
+    .toolbar-brand strong{font:600 13px/18px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+    .toolbar-brand small,.toolbar-status small,.quality-label{color:var(--secondary)}
+    button,select{background:var(--fill);border-color:transparent;border-radius:999px;transition:scale .25s cubic-bezier(.2,.8,.2,1),background .15s}
+    button:hover{background:var(--line)}button:active:not(:disabled){scale:.96}
+    button:focus-visible,select:focus-visible{outline-color:var(--accent)}
+    .toolbar-download{border-color:var(--line)}.toolbar-selection button{background:var(--fill)}
+    .primary{background:#007aff;color:#fff;border-color:#ffffff30;box-shadow:inset 0 1px #ffffff33}.primary:hover{background:#006ce5}
+    button[aria-pressed=true]{color:var(--accent);background:#007aff16;border-color:#007aff38}
+    select option{background:var(--panel-solid);color:inherit}
+    #error,#cancel{color:var(--danger)}#cancel{border-color:var(--line)}
+    @media(prefers-color-scheme:dark){:host{color:#f5f5f7;--panel:#2c2c2ee8;--panel-solid:#2c2c2e;--line:#ffffff24;--secondary:#b8b8c0;--fill:#e8e8f016;--accent:#64b5ff;--danger:#ff8989;color-scheme:dark}section{border-color:#ffffff30;box-shadow:inset 0 1px #ffffff24,0 8px 32px #0005}}
+    @media(prefers-reduced-transparency:reduce){section{background:var(--panel-solid);backdrop-filter:none}}
+    @supports not(backdrop-filter:blur(1px)){section{background:var(--panel-solid)}}
+    @media(prefers-contrast:more){section{background:var(--panel-solid);border-color:var(--secondary)}button,select{border-color:var(--secondary)}}
+    @media(prefers-reduced-motion:reduce){button,select{transition:none}button:active:not(:disabled){scale:1}}
     :host([hidden]),[hidden]{display:none!important}
   </style><section aria-label="MediaFlow batch video selection"><header><span class="toolbar-brand">${icon('list-video')}<span><strong>MediaFlow</strong><small>Profile selection</small></span></span><button id="close" aria-label="Minimize video selection" aria-expanded="true"></button></header>
     <div id="body"><div class="toolbar-status"><p id="hint" role="status"></p><small id="count"></small><small id="batch-status" role="status" hidden></small><div class="row batch-actions"><button id="batch-pause" hidden>Pause batch</button><button id="batch-retry" hidden>Retry failed</button></div></div><div class="row toolbar-selection"><button id="range">Select range</button><button id="new">Select new</button><button id="clear">Clear</button></div>
@@ -38,6 +57,7 @@ export async function installProfilePageSelector() {
   style.textContent=`.mediaflow-pick-card{position:relative!important}.mediaflow-pick-selected{outline:3px solid #818cf8!important;outline-offset:2px!important}.mediaflow-pick-tick{all:initial!important;box-sizing:border-box!important;position:absolute!important;top:8px!important;left:8px!important;z-index:1000!important;background:#172033!important;color:#fff!important;border:2px solid #a5b4fc!important;border-radius:7px!important;padding:5px 8px!important;font:700 13px/1.3 system-ui,sans-serif!important;cursor:pointer!important;box-shadow:0 2px 8px #0008!important}.mediaflow-pick-tick[aria-checked=true]{background:#252e4b!important;border-color:#a5b4fc!important}.mediaflow-pick-tick:focus-visible{outline:3px solid #a5b4fc!important}.mediaflow-pick-tick:disabled{cursor:default!important}`;
   document.documentElement.append(style);document.body.append(host);
   style.textContent+=`@font-face{font-family:MediaFlowPoppins;src:url('${(chrome.runtime.getURL?.('assets/fonts/poppins-500.ttf') || new URL('../fonts/poppins-500.ttf',import.meta.url).href)}')}@font-face{font-family:MediaFlowMontserrat;src:url('${(chrome.runtime.getURL?.('assets/fonts/montserrat-variable.ttf') || new URL('../fonts/montserrat-variable.ttf',import.meta.url).href)}')}.mediaflow-pick-card{border-radius:16px!important}.mediaflow-pick-selected{outline:none!important;box-shadow:0 0 0 2px #818cf8!important;background-color:#6366f10d!important}.mediaflow-pick-tick{display:inline-flex!important;align-items:center!important;gap:5px!important;font-family:MediaFlowPoppins,sans-serif!important;border-width:1px!important;border-radius:12px!important;background:#111827ed!important;padding:7px 10px!important;box-shadow:0 4px 12px #0004!important}.mediaflow-pick-tick .mf-icon{width:16px!important;height:16px!important;pointer-events:none!important}.mediaflow-pick-tick[aria-checked=true]{background:#252e4bf2!important;border-color:#a5b4fc!important}`;
+  style.textContent+=`.mediaflow-pick-selected{box-shadow:0 0 0 2px #007aff!important;background-color:#007aff0d!important}.mediaflow-pick-tick{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important;background:#29292bd9!important;border-color:#ffffff55!important;border-radius:999px!important;backdrop-filter:blur(16px) saturate(140%)!important;box-shadow:inset 0 1px #ffffff30,0 2px 8px #0003!important}.mediaflow-pick-tick[aria-checked=true]{background:#007affe6!important;border-color:#ffffff66!important}.mediaflow-pick-tick:focus-visible{outline-color:#64b5ff!important}@media(prefers-reduced-transparency:reduce){.mediaflow-pick-tick{background:#29292b!important;backdrop-filter:none!important}.mediaflow-pick-tick[aria-checked=true]{background:#007aff!important}}`;
   let saved=await chrome.storage.local.get(['profileScanState','profileSelectionState','m3u8DownloadHistory','profileBatchState','downloadQueueState']);
   let cards=new Map(),profile,selection,view,pending=0,refreshTimer,scanRequest=false;
   const text=(id,value)=>{const node=shadow.getElementById(id);if(node.textContent!==value)node.textContent=value;};
@@ -87,7 +107,7 @@ export async function installProfilePageSelector() {
       const boundary=selection?.mode==='range' ? [selection.start===videoKey(url)?'Start':'',selection.end===videoKey(url)?'End':''].filter(Boolean).join(' / ') : '';
       const label=(checked?'Selected':'Select')+(boundary?' · '+boundary:'');
       const markup=icon(checked?'check':'circle')+'<span>'+label+'</span>';
-      if(button.innerHTML!==markup)button.innerHTML=markup;
+      if(button.dataset.selectionMarkup!==label || !button.firstElementChild){button.innerHTML=markup;button.dataset.selectionMarkup=label;}
       button.setAttribute('aria-checked',String(checked));button.setAttribute('aria-label',label+': '+video.title);
       button.disabled=!!pending || downloaded && !(selection?.mode==='range' && !selection.end);
       card.classList.toggle('mediaflow-pick-selected',checked);present.set(card,button);
@@ -146,7 +166,13 @@ export async function installProfilePageSelector() {
   chrome.storage.onChanged.addListener((changes,area)=>{
     if(area!=='local')return;
     let changed=false;
-    for(const key of ['profileScanState','profileSelectionState','m3u8DownloadHistory','profileBatchState','downloadQueueState'])if(changes[key]){saved[key]=changes[key].newValue;changed=true;}
+    for(const key of ['profileScanState','profileSelectionState','m3u8DownloadHistory','profileBatchState'])if(changes[key]){saved[key]=changes[key].newValue;changed=true;}
+    if(changes.downloadQueueState){
+      const shape=value=>JSON.stringify((value?.tasks || []).map(task=>[task.id,task.batchId,task.status]));
+      const next=changes.downloadQueueState.newValue;
+      if(shape(saved.downloadQueueState)!==shape(next))changed=true;
+      saved.downloadQueueState=next;
+    }
     if(changed)refresh();
   });
   const observer=new MutationObserver(changes=>{

@@ -1,6 +1,14 @@
 import {xPost} from './x-media.js';
 import {missavVideoPage} from './missav-media.js';
 
+export function recognizedVideoPage(value){
+  try{
+    const url=new URL(value);
+    if(!/^https?:$/.test(url.protocol))return false;
+    return !!missavVideoPage(value) || !!xPost(value) || /view_video\.php/.test(url.pathname) && url.searchParams.has('viewkey') || /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(?:video[.\d]|videos?\/|v\/)/i.test(url.pathname) || /^(?:www\.)?redtube\.com$/i.test(url.hostname) && /^\/\d+\/?$/.test(url.pathname);
+  }catch{return false;}
+}
+
 export function videoKey(value) {
   try {
     const url = new URL(value);
@@ -18,7 +26,8 @@ export function videoKey(value) {
     const xv = url.pathname.match(/^\/(?:video\.([a-z0-9_-]+)|video(\d+))(?:\/|$)/i);
     if (xv) return `${host}:video:${xv[1] || xv[2]}`;
     const path = url.pathname.replace(/\/+$/,'') || '/';
-    const identity = ['v','id','video_id'].map(key => url.searchParams.has(key) ? `${key}=${url.searchParams.get(key)}` : '').filter(Boolean).join('&');
+    const queryKeys = host==='huangguoai.com' ? ['v','id','video_id','ep'] : ['v','id','video_id'];
+    const identity = queryKeys.map(key => url.searchParams.has(key) ? `${key}=${url.searchParams.get(key)}` : '').filter(Boolean).join('&');
     return `${host}${path}${identity ? '?'+identity : ''}`;
   } catch { return ''; }
 }
@@ -32,6 +41,16 @@ export function profileKey(value, name = '') {
 export function downloadedRecord(records, pageUrl, streamUrl) {
   const key = videoKey(pageUrl);
   return records.find(record => (key && record.pageUrl && videoKey(record.pageUrl) === key) || (streamUrl && record.url === streamUrl));
+}
+// Build once for bulk checks rather than scanning the entire history for every
+// profile card. This deliberately preserves page-alias and exact stream matching.
+export function createDownloadedLookup(records=[]) {
+  const pages=new Set(),streams=new Set();
+  for(const record of records){
+    if(record.pageUrl){const key=videoKey(record.pageUrl);if(key)pages.add(key);}
+    if(record.url)streams.add(record.url);
+  }
+  return (pageUrl,streamUrl,key=pageUrl?videoKey(pageUrl):'')=>!!(key && pages.has(key) || streamUrl && streams.has(streamUrl));
 }
 export function qualityNumber(value) {
   const displayed = Array.isArray(value) ? value[0] : value;

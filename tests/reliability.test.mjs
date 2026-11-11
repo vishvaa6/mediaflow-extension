@@ -4,6 +4,7 @@ import {fetchBytes,transientError,retryAfterMs,retryDelay} from '../assets/js/ne
 import {installWindowManager} from '../assets/js/window-manager.js';
 import {clampPopupSize} from '../assets/js/popup-surface.js';
 import {readFileSync} from 'node:fs';
+import {runInNewContext} from 'node:vm';
 import {chooseDefinition} from '../assets/js/media-resolver.js';
 import {videoKey} from '../assets/js/video-details.js';
 import {remuxToMp4,checkTsCodecs} from '../assets/js/mp4-output.js';
@@ -11,6 +12,34 @@ import {networkError} from '../assets/js/network.js';
 import {recognizedVideoPage} from '../assets/js/download-badges.js';
 import {fragment,mediaPayload,memoryRoot} from './fixtures/mp4.mjs';
 import {Mp4File} from '../assets/js/mp4-file.js';
+import {createProgressReporter} from '../assets/js/progress-reporter.js';
+
+test('rapid transfer progress is coalesced and phase changes flush the latest bytes',async()=>{
+  const sent=[],reporter=createProgressReporter(value=>sent.push(value),25);
+  reporter.update({phase:'downloading',bytesReceived:1});
+  for(let i=2;i<=1000;i++)reporter.update({phase:'downloading',bytesReceived:i});
+  assert.equal(sent.length,1,'network chunks must not each create a progress message');
+  await new Promise(resolve=>setTimeout(resolve,50));
+  assert.equal(sent.length,2);assert.equal(sent.at(-1).bytesReceived,1000);
+  reporter.update({phase:'downloading',bytesReceived:1200});
+  reporter.update({phase:'saving',isFileDownloading:true});
+  assert.equal(sent.length,3);assert.equal(sent.at(-1).bytesReceived,1200);assert.equal(sent.at(-1).phase,'saving');
+  reporter.update({phase:'saving',isFileDownloading:true,bytesReceived:1300});
+  reporter.flush();assert.equal(sent.at(-1).bytesReceived,1300);
+  reporter.dispose();
+});
+
+test('content bootstrap handles invalidated contexts and still reports unexpected errors',async()=>{
+  const script=readFileSync(new URL('../src/pages/contentDetection/index.js',import.meta.url),'utf8');
+  for(const [message,expectedEvents,expectedWarnings] of [['Extension context invalidated.',2,0],['Unexpected bootstrap failure',0,2]]){
+    const events=[],warnings=[];
+    const context={chrome:{runtime:{getURL(){throw Error(message);}}},document:{dispatchEvent:event=>events.push(event.type)},Event:class{constructor(type){this.type=type;}},console:{warn:(...args)=>warnings.push(args)}};
+    runInNewContext(script,context);
+    await new Promise(resolve=>setTimeout(resolve,0));
+    assert.deepEqual(events,Array(expectedEvents).fill('mediaflow:context-invalidated'));
+    assert.equal(warnings.length,expectedWarnings);
+  }
+});
 
 test('a slow but progressing body outlives the inactivity timeout',async()=>{
   const data=await fetchBytes('https://fixture.test/slow',{timeout:60,fetcher:async()=>new Response(new ReadableStream({async start(controller){for(let i=0;i<6;i++){await new Promise(resolve=>setTimeout(resolve,20));controller.enqueue(Uint8Array.of(i));}controller.close();}}))});
@@ -37,6 +66,7 @@ test('MP4 preference does not downgrade quality to find a native MP4',()=>{
 test('history identities recognize aliases without merging different videos',()=>{
   assert.equal(videoKey('https://pornhub.org/view_video.php?viewkey=abc'),videoKey('https://www.pornhub.com/view_video.php?viewkey=abc&ref=feed'));
   assert.equal(videoKey('https://missav.ws/dm265/en/abc-123'),videoKey('https://missav.live/ja/abc-123'));
+  assert.equal(videoKey('https://missav123.com/dm36/en/juq-045'),videoKey('https://missav.ws/en/juq-045'));
   assert.equal(videoKey('https://xhamster42.desi/videos/same-123'),videoKey('https://xhamster.com/videos/same-123'));
   assert.notEqual(videoKey('https://missav.ws/en/abc-123'),videoKey('https://missav.ws/en/abc-124'));
 });
