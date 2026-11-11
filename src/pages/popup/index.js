@@ -9,6 +9,7 @@ import {createPopupSurface} from '../../../assets/js/popup-surface.js';
 import {normalizeQueueLimit,normalizePendingLimit} from '../../../assets/js/queue-limits.js';
 import {batchProgress} from '../../../assets/js/batch-progress.js';
 import {createLiquidWorkspace} from '../../../assets/js/liquid-workspace.js';
+import {openPageOverlay} from './overlay-launch.js';
 const popupSurface=createPopupSurface();
 const liquidWorkspace=createLiquidWorkspace();
 const isManagedPage=value=>isXPage(value) || isMissavPage(value);
@@ -142,6 +143,8 @@ function normalizeFormat(format, url) {
 // App State
 const state = {
   activeTab: 'video', // 'video' | 'profile' | 'settings'
+  downloadView: 'detected',
+  overlayUnavailable: false,
   activePageUrl: '',
   activeBrowserTabId:null,
   activePageTitle: '',
@@ -340,6 +343,11 @@ function updateProfileSelection() {
   if(selectNew)selectNew.disabled=state.isBatchEnqueuing || !newCount;
   const stats=document.querySelector('.profile-stats-text');
   if(stats && state.profileVideos.length)stats.textContent=`${state.profileVideos.length} videos · ${newCount} new · ${state.profileVideos.length-newCount} downloaded`;
+  const downloaded=state.profileVideos.length-newCount;
+  document.querySelectorAll('[data-role="library-downloaded"]').forEach(node=>node.textContent=downloaded);
+  document.querySelectorAll('[data-role="library-remaining"]').forEach(node=>node.textContent=newCount);
+  const progress=document.querySelector('[data-role="library-progress"]');
+  if(progress){const percent=state.profileVideos.length?Math.round(downloaded/state.profileVideos.length*100):0;progress.style.setProperty('--library-progress',`${percent}%`);progress.setAttribute('aria-valuenow',String(percent));}
 }
 function bindThumbnailFallbacks() {
   if(!state.showThumbnails)return;
@@ -502,6 +510,10 @@ function applyTasks(tasks) {
     updateBatchControls();
     return;
   }
+  if(state.downloadView==='detected' && key===lastTaskStructureKey){
+    const count=document.querySelector('[data-role="queue-count"]');if(count)count.textContent=state.tasks.length;
+    return;
+  }
   if (key !== lastTaskStructureKey || !list) {
     lastTaskStructureKey = key;
     render();
@@ -557,7 +569,8 @@ function render({resetProfileScroll=false}={}) {
         </div>
 
         <div class="popup-header-actions">
-        ${popupSurface.surface==='popup'?`<button class="btn-icon-btn" id="btn-open-browser-tab" title="Open full view in a browser tab" aria-label="Open full view in a browser tab">${icon('arrow-up-right')}</button>`:''}
+        ${popupSurface.surface==='popup' || popupSurface.surface==='overlay'?`<button class="btn-icon-btn" id="btn-open-browser-tab" title="Open full view in a browser tab" aria-label="Open full view in a browser tab">${icon('arrow-up-right')}</button>`:''}
+        ${popupSurface.surface==='overlay'?`<button class="btn-icon-btn" id="btn-close-overlay" title="Close MediaFlow" aria-label="Close MediaFlow">${icon('x')}</button>`:''}
         <select class="popup-lang-select" id="popup-lang-selector" aria-label="Interface language">
           <option value="en">English</option>
           <option value="zh_CN">简体中文</option>
@@ -568,11 +581,12 @@ function render({resetProfileScroll=false}={}) {
         </div>
       </div>
 
+      ${state.overlayUnavailable?'<div class="overlay-fallback-notice" role="status">The glass panel could not open on this page. Using the browser popup.</div>':''}
       <!-- Primary navigation -->
       <nav class="popup-tabs-bar" aria-label="MediaFlow views">
         <button class="popup-tab-btn ${state.activeTab === 'video' ? 'active' : ''}" id="tab-video" data-tab="video" aria-pressed="${state.activeTab==='video'}">
           ${icon('download')} ${t('tabVideoQueue')}
-          ${state.tasks.length ? `<span class="tab-badge">${state.tasks.length}</span>` : ''}
+          <span class="tab-badge">${state.tasks.length}</span>
         </button>
         <button class="popup-tab-btn ${state.activeTab === 'profile' ? 'active' : ''}" id="tab-profile" data-tab="profile" aria-pressed="${state.activeTab==='profile'}">
           ${icon('user')} ${t('tabProfileVideos')}
@@ -585,7 +599,7 @@ function render({resetProfileScroll=false}={}) {
       </nav>
 
       <!-- Tab Content Area -->
-      <div class="popup-scroll tab-${state.activeTab}" data-view="${state.activeTab}" tabindex="0" role="region" aria-label="${state.activeTab==='video'?'Downloads':state.activeTab==='profile'?'Library':state.activeTab==='settings'?'Settings':'History'} content">
+      <div class="popup-scroll tab-${state.activeTab}" data-view="${state.activeTab==='video'?'video-'+state.downloadView:state.activeTab}" tabindex="0" role="region" aria-label="${state.activeTab==='video'?'Downloads':state.activeTab==='profile'?'Library':state.activeTab==='settings'?'Settings':'History'} content">
         ${renderTabContent()}
       </div>
       ${popupSurface.surface==='popup'?`<button class="popup-resize-handle" id="btn-resize-popup" aria-label="Resize popup. Drag the corner or use arrow keys." title="Resize popup (up to 800 × 600)">${icon('maximize-2')}</button>`:''}
@@ -599,7 +613,7 @@ function render({resetProfileScroll=false}={}) {
   if(state.activeTab==='profile')updateProfileSelection();
   updateBatchControls();
   const scroller = document.querySelector('.popup-scroll');
-  if (scroller) scroller.scrollTop = state.activeTab==='profile'?0:state.viewScroll[state.activeTab] || 0;
+  if (scroller) scroller.scrollTop = state.activeTab==='profile'?0:state.viewScroll[scroller.dataset.view] || 0;
   const profileGrid=document.querySelector('.profile-video-grid');if(profileGrid)profileGrid.scrollTop=state.profileListScroll;
   const nextFocus = focusId ? document.getElementById(focusId) : focusVideoId ? [...document.querySelectorAll('.profile-video-checkbox')].find(node=>node.dataset.videoId===focusVideoId) : null;
   if (nextFocus) { nextFocus.focus({preventScroll:true}); if (typeof selection === 'number') nextFocus.setSelectionRange?.(selection, selection); }
@@ -630,8 +644,13 @@ function renderVideoQueueTab() {
 
   return `
     <!-- Current Video Detection -->
-    <div class="view-heading"><div><h1>Downloads</h1><p>Videos from your current browser tab.</p></div><button class="btn-pill-action" id="btn-refresh-detection">${icon('rotate-cw')}Refresh detection</button></div>
+    <div class="view-heading"><div><h1>Downloads</h1><p>${state.downloadView==='detected'?'Choose a video from your current tab.':'Keep track of your downloads.'}</p></div>${state.downloadView==='detected'?`<button class="btn-pill-action" id="btn-refresh-detection">${icon('rotate-cw')}Refresh detection</button>`:''}</div>
+    <nav class="download-switcher" aria-label="Download views">
+      <button type="button" data-download-view="detected" aria-pressed="${state.downloadView==='detected'}">${icon('video')} Detected videos <span>${state.detectedVideos.length}</span></button>
+      <button type="button" data-download-view="queue" aria-pressed="${state.downloadView==='queue'}">${icon('list-video')} Download queue <span data-role="queue-count">${state.tasks.length}</span></button>
+    </nav>
     <div class="downloads-workspace">
+    ${state.downloadView==='detected'?`
     ${isXPage(state.activePageUrl) && !state.detectedVideos.length?'<p class="profile-scan-status">Scroll a video into view on X. Visible videos are detected automatically.</p>':''}
     ${isMissavPage(state.activePageUrl) && !state.detectedVideos.length?'<p class="profile-scan-status">Visible MissAV videos are detected automatically. Scroll a video card or the player into view.</p>':''}
     ${state.detectionStatus?`<p class="profile-scan-status" role="status">${escapeHtml(state.detectionStatus)}</p>`:''}
@@ -685,6 +704,8 @@ function renderVideoQueueTab() {
       </div>
     `}
 
+    `:''}
+    ${state.downloadView==='queue'?`
     <!-- Download Queue Section -->
     <section class="card-section queue-section" aria-label="Download queue">
       <div class="section-header-row">
@@ -759,10 +780,10 @@ function renderVideoQueueTab() {
       ` : `
         <div class="queue-empty">${icon('list-video')}<div><strong>Your queue is clear</strong><span>Choose a quality or select videos in your library.</span></div></div>
       `}
-    </section>
+    </section>`:''}
     </div>
 
-    ${state.history.length?'<button class="btn-pill-action history-shortcut" id="btn-view-history">View download history ('+state.history.length+')</button>':''}
+    ${state.downloadView==='queue' && state.history.length?'<button class="btn-pill-action history-shortcut" id="btn-view-history">View download history ('+state.history.length+')</button>':''}
   `;
 }
 
@@ -800,6 +821,11 @@ function renderProfileTab() {
     ${state.isScanningProfile?'<div class="profile-notice" role="status"><span>Loading videos from linked pages…</span><button class="btn-text-sm" id="btn-stop-profile-scan">Stop scan</button></div>':''}
     ${state.batchProgress?`<div class="profile-batch-panel ${state.profileBatchStatus==='error'?'notice-error':''}"><div class="profile-notice" role="status"><span data-role="batch-progress" title="${escapeHtml(state.batchProgress)}">${escapeHtml(state.batchProgress)}</span></div><div class="profile-batch-actions"><button class="btn-pill-action" id="btn-pause-profile-batch" hidden>Pause batch</button><button class="btn-pill-action" id="btn-retry-profile-batch" hidden>Retry failed</button></div></div>`:''}
     ${totalCount?`
+      <div class="library-overview" aria-label="Library download progress">
+        <div class="library-overview-copy"><span class="library-eyebrow">YOUR COLLECTION</span><strong>Download progress</strong><span>Based on videos found in this library</span></div>
+        <div class="library-overview-stats"><div><strong data-role="library-downloaded">${totalCount-newCount}</strong><span>Downloaded</span></div><div><strong data-role="library-remaining">${newCount}</strong><span>To download</span></div></div>
+        <div class="library-progress" data-role="library-progress" role="progressbar" aria-label="Library videos downloaded" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round((totalCount-newCount)/totalCount*100)}" style="--library-progress:${Math.round((totalCount-newCount)/totalCount*100)}%"><span></span></div>
+      </div>
       <div class="profile-selection-toolbar" aria-label="Video selection tools">
         <div class="profile-selection-actions"><button class="btn-pill-action" id="btn-profile-select-all" ${!newCount || state.isBatchEnqueuing?'disabled':''}>Select new</button><button class="btn-pill-action" id="btn-profile-range" aria-pressed="false">Select range</button><button class="btn-pill-action" id="btn-profile-clear-selection">Clear</button></div>
         <div class="profile-download-options"><label class="profile-quality-label"><span>Quality</span><select class="profile-quality-select" id="profile-quality-select" aria-label="Download quality">${[['best','Best available'],['1080','1080p'],['720','720p'],['480','480p'],['240','240p']].map(([value,label])=>`<option value="${value}" ${state.profileQuality===value?'selected':''}>${label}</option>`).join('')}</select></label>${outputFormatControl('profile-output-format')}</div>
@@ -871,6 +897,7 @@ function renderSettingsTab() {
 
 // Bind DOM Events
 function bindEvents() {
+  document.querySelector('#btn-close-overlay')?.addEventListener('click',()=>window.parent.postMessage({type:'mediaflow-overlay-close'},'*'));
   const profileScroll=document.querySelector('.popup-scroll.tab-profile');
   profileScroll?.addEventListener('wheel',event=>{
     const grid=profileScroll.querySelector('.profile-video-grid');
@@ -925,6 +952,7 @@ function bindEvents() {
     try{await settingsStorage.setShowThumbnails(!state.showThumbnails);}catch(error){showToast(error.message,'error');}
   });
   document.querySelector('#btn-view-history')?.addEventListener('click',()=>{state.activeTab='history';render();});
+  document.querySelectorAll('[data-download-view]').forEach(button=>button.addEventListener('click',()=>{state.downloadView=button.dataset.downloadView;render();}));
   document.querySelector('#profile-filter-input')?.addEventListener('input',event=>{state.profileSearchQuery=event.target.value;state.profileGridPage=0;render({resetProfileScroll:true});});
   document.querySelector('#history-search')?.addEventListener('input',event=>{state.historyQuery=event.target.value;state.historyPage=0;render();});
   document.querySelector('#history-prev')?.addEventListener('click',()=>{state.historyPage--;render();});
@@ -1311,3 +1339,4 @@ async function init() {
 
 // Run
 init();
+if(popupSurface.surface==='popup')openPageOverlay().then(result=>{if(result?.fallback){state.overlayUnavailable=true;render();}});

@@ -10,6 +10,7 @@
     "offscreen",
     "declarativeNetRequest",
     "activeTab",
+    "scripting",
     "tabs",
     "alarms"
   ],
@@ -30,6 +31,11 @@
     "128": "icon-128.png"
   },
   "content_scripts": [
+    {
+      "run_at": "document_idle",
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["src/pages/overlay-host.js"]
+    },
     {
       "run_at": "document_start",
       "matches": ["https://*.x.com/*", "https://*.twitter.com/*"],
@@ -81,6 +87,7 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "src/pages/popup/overlay.html",
         "assets/js/*.js",
         "assets/css/*.css",
         "assets/fonts/*",

@@ -6,7 +6,8 @@ export function clampPopupSize(value={},screen={availWidth:800,availHeight:600})
 }
 
 export function createPopupSurface(){
-  const surface=new URLSearchParams(location.search).get('surface')==='popup'?'popup':'tab';
+  const requested=new URLSearchParams(location.search).get('surface');
+  const surface=requested==='popup'?'popup':requested==='overlay'?'overlay':'tab';
   document.documentElement.dataset.surface=surface;
   let size=clampPopupSize({},window.screen);
   const apply=next=>{
