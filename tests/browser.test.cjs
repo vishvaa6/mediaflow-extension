@@ -69,6 +69,7 @@ const server = http.createServer((req,res) => {
       const originalSet=local.set;local.set=async patch=>{if(patch.mediaflowPopupSize)localStorage.setItem('testPopupSize',JSON.stringify(patch.mediaflowPopupSize));await originalSet(patch);};
     },{origin});
     await page.goto(origin+'/src/pages/popup/index.html');
+    await page.locator('[data-download-view="queue"]').click();
     await page.waitForSelector('.task-speed-badge');
     await page.evaluate(async()=>{window.savedQueue=(await testStorage.get('downloadQueueState')).downloadQueueState;await testStorage.set({downloadQueueState:{tasks:[{id:'retry-474',fileName:'Interrupted download',status:'queued',phase:'waiting',error:'HTTP 474: unable to fetch video',retryCount:7,nextRetryAt:Date.now()+60000,cachedBytes:1024}]}});});
     await page.waitForSelector('[data-task-id="retry-474"] [aria-label="Retry now"]');
@@ -99,7 +100,8 @@ const server = http.createServer((req,res) => {
     await page.evaluate(async()=>{const {settingsStorage}=await import('/assets/js/storage.js');await settingsStorage.setMaxConcurrentTasks(20);});
     await page.waitForFunction(()=>document.querySelector('.concurrency-val')?.textContent==='12');
     assert.equal(await page.locator('#btn-concurrency-plus').isDisabled(),true);
-    await page.locator('[data-tab="video"]').click();assert.equal(await page.locator('#queue-limit').inputValue(),'12');
+    await page.locator('[data-tab="video"]').click();await page.locator('[data-download-view="queue"]').click();assert.equal(await page.locator('#queue-limit').inputValue(),'12');
+    await page.locator('[data-download-view="detected"]').click();
     assert.equal(await page.locator('#download-output-format').inputValue(),'mp4');
     assert.match(await page.locator('.btn-download-action').first().innerText(),/Download MP4/);
     assert.deepEqual(await page.locator('.qualities-list .quality-badge').allTextContents(),['240','240','480','480','720','720','1080','1080']);
@@ -115,6 +117,7 @@ const server = http.createServer((req,res) => {
     assert.equal(await page.locator('.qualities-list .quality-badge').count(),8,'known-site results must exclude unrelated preloaded/advertising resources');
     await page.waitForFunction(()=>document.querySelector('.current-thumbnail-img')?.naturalWidth>0);
     assert.equal(await page.locator('.video-detected-box .already-downloaded:visible').count(),1);
+    await page.locator('[data-download-view="queue"]').click();
     assert.match(await page.locator('.task-speed-badge').innerText(),/2.0 MB\/s/);
     await page.evaluate(()=>testStorage.set({downloadQueueState:{tasks:[{id:'download-1',fileName:'Test download',status:'downloading',progress:30,downloadSpeed:4096}]}}));
     await page.waitForFunction(()=>document.querySelector('.task-speed-badge')?.textContent.includes('4.0 KB/s'));
@@ -189,7 +192,7 @@ const server = http.createServer((req,res) => {
     await page.locator('#toggle-thumbnails').click();
     await page.waitForFunction(()=>document.querySelector('#toggle-thumbnails')?.getAttribute('aria-checked')==='false');
     assert.equal(await page.evaluate(async()=>(await testStorage.get('download-settings'))['download-settings'].showThumbnails),false);
-    await page.locator('[data-tab="video"]').click();assert.equal(await page.locator('.current-thumbnail-img').count(),0);
+    await page.locator('[data-tab="video"]').click();await page.locator('[data-download-view="detected"]').click();assert.equal(await page.locator('.current-thumbnail-img').count(),0);
     await page.locator('[data-tab="profile"]').click();assert.equal(await page.locator('.profile-thumb-img').count(),0);
     await page.locator('[data-tab="history"]').click();assert.equal(await page.locator('.history-thumbnail-img').count(),0);
     await page.locator('[data-tab="settings"]').click();await page.locator('#toggle-thumbnails').click();
@@ -279,8 +282,11 @@ const server = http.createServer((req,res) => {
     await page.locator('#profile-filter-input').fill('');
     assert.equal(await page.locator('.profile-video-card').count(),60);
     await page.locator('[data-tab="video"]').click();
-    const sourcePanel=await page.locator('.video-detected-box').boundingBox(),queuePanel=await page.locator('.queue-section').boundingBox();
-    assert.ok(queuePanel.x>sourcePanel.x && Math.abs(queuePanel.y-sourcePanel.y)<2,'downloads and queue appear side by side in the attached popup');
+    assert.equal(await page.locator('.video-detected-box').count(),1);
+    assert.equal(await page.locator('.queue-section').count(),0);
+    await page.locator('[data-download-view="queue"]').click();
+    assert.equal(await page.locator('.video-detected-box').count(),0);
+    assert.equal(await page.locator('.queue-section').count(),1);
     await page.screenshot({path:path.join(root,'test-results/downloads-workspace.png'),fullPage:true});
     await page.locator('[data-tab="history"]').click();
     await page.locator('.history-file-details summary').first().click();
