@@ -4,11 +4,12 @@ import {mediaFormat,mediaHeight} from './media-extraction.js';
 import {mediaHeaders} from './media-headers.js';
 import {visibleArea} from './viewport.js';
 import {recognizedVideoPage} from './video-details.js';
+import {is91PornPage,is91PornWatchPage,find91PornPlayer} from './porn91-media.js';
 
 const videoPath=/\.(?:mp4|webm|m3u8)(?:[?#]|$)/i;
 const unsupportedType=/^(?:audio|image)\/|dash\+xml/i;
 const unsupportedPath=/\.(?:mpd|m4a|mp3|aac|jpg|jpeg|avif|webp|png|svg|gif|vtt|css|js)(?:[?#]|$)/i;
-const sitePlayer=/^(?:(?:[^.]+\.)?(?:pornhub\.(?:com|org)|pornhubpremium\.com|redtube\.com)|xvideos\.com|xvv1deos\.com|xnxx\.(?:com|es)|xhamster\d*\.(?:com|desi)|123av\.com|rou\.video|tangxinvlog\.app|huangguoai\.com)$/i;
+const sitePlayer=/^(?:(?:[^.]+\.)?(?:pornhub\.(?:com|org)|pornhubpremium\.com|redtube\.com|91porn\.com)|xvideos\.com|xvv1deos\.com|xnxx\.(?:com|es)|xhamster\d*\.(?:com|desi)|123av\.com|rou\.video|tangxinvlog\.app|huangguoai\.com)$/i;
 const nativeToolbar='.mgp_controlsBar,.mhp1138_controlsBar';
 const nativePlayer='.mgp_player,.mhp1138_player,.video-element-wrapper-js,[id^="playerDiv"],#player';
 const previewCard='.videoBox,.pcVideoListItem,.thumb-block,.thumb-list__item,.video-card';
@@ -55,6 +56,7 @@ function embedded123avPlayer(){
 }
 
 function mainWatchPlayer(host,players){
+  if(is91PornPage(location.href))return find91PornPlayer(document);
   if(host==='123av.com'){
     const frame=[...document.querySelectorAll('iframe[src]')].find(element=>
       siteHostname(element.src)==='javplayer.cc' && /^\/e\/[\w]+\/?$/.test(new URL(element.src).pathname));
@@ -100,6 +102,7 @@ export function installGenericPlayerDetection(){
     const pageUrl=location.href,host=siteHostname(pageUrl);
     const players=[...document.querySelectorAll('video:not(.preview):not([id^="preview-"])')];
     const topPage=window.top===window;
+    if(topPage && is91PornPage(pageUrl) && !is91PornWatchPage(pageUrl))return [];
     const supportedSite=sitePlayer.test(host);
     const watchPage=topPage && supportedSite && (recognizedVideoPage(pageUrl) || host==='huangguoai.com' && /^\/detail\/\d+(?:\/|$)/.test(location.pathname));
     const main=watchPage ? mainWatchPlayer(host,players) : null;
@@ -152,6 +155,7 @@ export function installGenericPlayerDetection(){
     if(resolved.has(key))return Promise.resolve();
     const job=(async()=>{
       let definitions=[];
+      if(is91PornPage(entry.pageUrl) && entry.direct.length){resolved.set(key,[]);return;}
       try{
         // The watch page can contain unrelated preview videos. Keep its player
         // configuration scripts and the primary element's own sources.
@@ -175,7 +179,7 @@ export function installGenericPlayerDetection(){
       const knownSite=sitePlayer.test(new URL(entry.pageUrl).hostname.replace(/^www\./,''));
       let videos=definitions.flatMap(source=>normalize(source,knownSite));
       const hasAdditionalSources=videos.some(video=>!entry.direct.some(source=>source.videoUrl===video.videoUrl));
-      if(!videos.length || knownSite && !hasAdditionalSources){
+      if(!is91PornPage(entry.pageUrl) && (!videos.length || knownSite && !hasAdditionalSources)){
         let timeout;
         try{
           const result=await Promise.race([chrome.runtime.sendMessage({type:'media-player-sources'}),new Promise(resolve=>{timeout=setTimeout(resolve,6000);})]);

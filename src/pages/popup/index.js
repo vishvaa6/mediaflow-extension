@@ -4,12 +4,12 @@ import {selectionView,changeSelection,rangeHint} from '../../../assets/js/profil
 import {mediaHeaders} from '../../../assets/js/media-headers.js';
 import {isXPage} from '../../../assets/js/x-media.js';
 import {isMissavPage} from '../../../assets/js/missav-media.js';
+import {is91PornPage} from '../../../assets/js/porn91-media.js';
 import {icon} from '../../../assets/js/icons.js';
 import {createPopupSurface} from '../../../assets/js/popup-surface.js';
 import {normalizeQueueLimit,normalizePendingLimit} from '../../../assets/js/queue-limits.js';
 import {batchProgress} from '../../../assets/js/batch-progress.js';
 import {createLiquidWorkspace} from '../../../assets/js/liquid-workspace.js';
-import {openPageOverlay} from './overlay-launch.js';
 const popupSurface=createPopupSurface();
 const liquidWorkspace=createLiquidWorkspace();
 const isManagedPage=value=>isXPage(value) || isMissavPage(value);
@@ -144,7 +144,6 @@ function normalizeFormat(format, url) {
 const state = {
   activeTab: 'video', // 'video' | 'profile' | 'settings'
   downloadView: 'detected',
-  overlayUnavailable: false,
   activePageUrl: '',
   activeBrowserTabId:null,
   activePageTitle: '',
@@ -159,7 +158,7 @@ const state = {
   useChannelFolder: true,
   maxConcurrentTasks: 6,
   maxPendingTasks: 0,
-  outputFormat:'mp4',profileSourceOpen:false,profileListScroll:0,profileSearchQuery:'',viewScroll:{},
+  outputFormat:'mp4',profileSourceOpen:false,profileListScroll:0,profileDetailsCollapsed:false,profileSearchQuery:'',viewScroll:{},
   tasks: [],queuePage:0,
   history: [],
   // Profile state
@@ -465,14 +464,14 @@ function taskStatusLabel(task) {
 }
 
 function taskProgressNumsHtml(task) {
-  const progress = Math.min(100, Math.round(task.progress || 0));
+  const progress = Math.max(0, Math.min(100, Math.round(task.progress || 0)));
   const isDownloading = task.status === 'downloading';
   const spd = task.downloadSpeed ?? task.speed ?? 0;
   const speed = task.speedFormatted || (typeof spd === 'string' ? spd : formatSpeed(Number(spd)));
   const bytes = task.fetchedBytes || task.cachedBytes || 0;
   return `
-    <span>${progress}%</span>
-    ${task.targetSegment > 1 ? `<span>(${task.finishNum || 0}/${task.targetSegment})</span>` : ''}
+    <span class="task-progress-percent">${progress}%</span>
+    ${task.targetSegment > 1 ? `<span>${task.finishNum || 0}/${task.targetSegment} segments</span>` : ''}
     ${bytes > 0 ? `<span>${formatBytes(bytes)}</span>` : ''}
     ${isDownloading && !task.isFileDownloading && speed ? `<span class="task-speed-badge">${icon('zap')} ${escapeHtml(speed)}</span>` : ''}
   `;
@@ -523,9 +522,11 @@ function applyTasks(tasks) {
   for (const task of visible) {
     const card = cards.get(String(task.id));
     if (!card) { render(); return; }
-    const progress = Math.min(100, Math.round(task.progress || 0));
+    const progress = Math.max(0, Math.min(100, Math.round(task.progress || 0)));
     const bar = card.querySelector('[data-role="bar"]');
     if (bar && bar.style.width!==`${progress}%`) bar.style.width = `${progress}%`;
+    const track = card.querySelector('[role="progressbar"]');
+    if (track) track.setAttribute('aria-valuenow', String(progress));
     const nums = card.querySelector('[data-role="nums"]');
     if (nums) {const html=taskProgressNumsHtml(task);if(progressMarkup.get(nums)!==html){nums.innerHTML=html;progressMarkup.set(nums,html);}}
     const st = card.querySelector('[data-role="status"]');
@@ -540,7 +541,7 @@ function render({resetProfileScroll=false}={}) {
 
   const oldScroller=document.querySelector('.popup-scroll');
   if(oldScroller?.dataset.view)state.viewScroll[oldScroller.dataset.view]=oldScroller.scrollTop;
-  if(resetProfileScroll)state.profileListScroll=0;
+  if(resetProfileScroll){state.profileListScroll=0;state.profileDetailsCollapsed=false;}
   else if(document.querySelector('.profile-video-grid'))state.profileListScroll=document.querySelector('.profile-video-grid').scrollTop;
   const focused = document.activeElement;
   const focusId = focused?.id;
@@ -581,7 +582,6 @@ function render({resetProfileScroll=false}={}) {
         </div>
       </div>
 
-      ${state.overlayUnavailable?'<div class="overlay-fallback-notice" role="status">The glass panel could not open on this page. Using the browser popup.</div>':''}
       <!-- Primary navigation -->
       <nav class="popup-tabs-bar" aria-label="MediaFlow views">
         <button class="popup-tab-btn ${state.activeTab === 'video' ? 'active' : ''}" id="tab-video" data-tab="video" aria-pressed="${state.activeTab==='video'}">
@@ -602,7 +602,7 @@ function render({resetProfileScroll=false}={}) {
       <div class="popup-scroll tab-${state.activeTab}" data-view="${state.activeTab==='video'?'video-'+state.downloadView:state.activeTab}" tabindex="0" role="region" aria-label="${state.activeTab==='video'?'Downloads':state.activeTab==='profile'?'Library':state.activeTab==='settings'?'Settings':'History'} content">
         ${renderTabContent()}
       </div>
-      ${popupSurface.surface==='popup'?`<button class="popup-resize-handle" id="btn-resize-popup" aria-label="Resize popup. Drag the corner or use arrow keys." title="Resize popup (up to 800 × 600)">${icon('maximize-2')}</button>`:''}
+      ${popupSurface.surface==='popup' || popupSurface.surface==='overlay'?`<button class="popup-resize-handle ${popupSurface.surface==='overlay'?'overlay-resize-handle':''}" id="btn-resize-popup" aria-label="Resize MediaFlow. Drag the corner or use arrow keys; press Home to reset." title="Resize MediaFlow">${icon('maximize-2')}</button>`:''}
     </div>
   `;
 
@@ -728,7 +728,7 @@ function renderVideoQueueTab() {
             const isDownloading = task.status === 'downloading';
             const isPaused = task.status === 'paused';
             const isError = task.status === 'error';
-            const progress = Math.min(100, Math.round(task.progress || 0));
+            const progress = Math.max(0, Math.min(100, Math.round(task.progress || 0)));
 
             return `
               <div class="task-card-modern status-${escapeHtml(task.status)}" data-task-id="${escapeHtml(task.id)}">
@@ -740,20 +740,20 @@ function renderVideoQueueTab() {
                 </div>
 
                 <div class="task-meta-row">
-                  <span class="task-output-format">${escapeHtml((task.outputReady?task.outputExtension || task.format:task.outputFormat==='mp4'?'MP4 preferred':task.format==='pending'?'Source':task.format || 'Source').toUpperCase())}</span>
                   <div class="task-progress-nums" data-role="nums">
                     ${taskProgressNumsHtml(task)}
                   </div>
+                  <span class="task-output-format">${escapeHtml((task.outputReady?task.outputExtension || task.format:task.outputFormat==='mp4'?'MP4 preferred':task.format==='pending'?'Source':task.format || 'Source').toUpperCase())}</span>
                   <div class="task-actions">
                     ${isDownloading || task.status === 'queued' ? `
-                      <button class="btn-icon-btn" data-action="pause" data-id="${escapeHtml(task.id)}" title="Pause">${icon('pause')}</button>
+                      <button class="btn-icon-btn" data-action="pause" data-id="${escapeHtml(task.id)}" title="Pause" aria-label="Pause">${icon('pause')}</button>
                       ${task.status==='queued' && task.nextRetryAt>Date.now()?`<button class="btn-icon-btn" data-action="retry" data-id="${escapeHtml(task.id)}" title="Retry now" aria-label="Retry now">${icon('rotate-cw')}</button>`:''}
                     ` : isPaused ? `
-                      <button class="btn-icon-btn" data-action="resume" data-id="${escapeHtml(task.id)}" title="Resume">${icon('play')}</button>
+                      <button class="btn-icon-btn" data-action="resume" data-id="${escapeHtml(task.id)}" title="Resume" aria-label="Resume">${icon('play')}</button>
                     ` : isError ? `
-                      <button class="btn-icon-btn" data-action="retry" data-id="${escapeHtml(task.id)}" title="Retry" style="color:var(--primary);">${icon('rotate-cw')}</button>
+                      <button class="btn-icon-btn" data-action="retry" data-id="${escapeHtml(task.id)}" title="Retry" aria-label="Retry" style="color:var(--primary);">${icon('rotate-cw')}</button>
                     ` : ''}
-                    <button class="btn-icon-btn" data-action="delete" data-id="${escapeHtml(task.id)}" title="Remove">${icon('x')}</button>
+                    <button class="btn-icon-btn" data-action="delete" data-id="${escapeHtml(task.id)}" title="Remove" aria-label="Remove">${icon('x')}</button>
                   </div>
                 </div>
 
@@ -770,7 +770,7 @@ function renderVideoQueueTab() {
                 ${task.nextRetryAt>Date.now()?`<div class="task-recovery-note" role="status">${icon('rotate-cw')}Connection or server issue. Retry ${task.retryCount} is scheduled; cached progress is retained.</div>`:''}
                 ${task.fallbackReason?`<div class="task-recovery-note">${icon('info')}${escapeHtml(task.fallbackReason)}</div>`:''}
 
-                <div class="task-progress-bar-bg">
+                <div class="task-progress-bar-bg" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}">
                   <div class="task-progress-bar-fill" data-role="bar" style="width: ${progress}%;"></div>
                 </div>
               </div>
@@ -790,6 +790,7 @@ function renderVideoQueueTab() {
 // Library: loaded profile videos and selection
 function renderProfileTab() {
   const selectedCount=state.selectedIds.size,totalCount=state.profileVideos.length;
+  if (!totalCount) state.profileDetailsCollapsed=false;
   const newCount=state.profileVideos.filter(video=>!profileVideoDownloaded(video)).length;
   const query=state.profileSearchQuery.trim().toLocaleLowerCase();
   const matches=state.profileVideos.filter(video=>!query || String(video.title || '').toLocaleLowerCase().includes(query));
@@ -799,6 +800,8 @@ function renderProfileTab() {
   const sourceOpen=state.profileSourceOpen || !totalCount || !!state.profileScanError;
   const rangeActive=currentProfileSelection()?.mode==='range';
   return `<section class="profile-workspace" aria-label="Creator video library">
+    <div class="profile-library-details ${state.profileDetailsCollapsed?'is-collapsed':''}" id="profile-library-details" aria-hidden="${state.profileDetailsCollapsed}" ${state.profileDetailsCollapsed?'inert':''}>
+    <div class="profile-library-details-content">
     <details class="profile-source-panel" id="profile-source-details" ${sourceOpen?'open':''}>
       <summary class="profile-source-summary" id="profile-source-summary">
         <span class="profile-creator">
@@ -825,9 +828,11 @@ function renderProfileTab() {
         <div class="library-overview-copy"><span class="library-eyebrow">YOUR COLLECTION</span><strong>Download progress</strong><span>Based on videos found in this library</span></div>
         <div class="library-overview-stats"><div><strong data-role="library-downloaded">${totalCount-newCount}</strong><span>Downloaded</span></div><div><strong data-role="library-remaining">${newCount}</strong><span>To download</span></div></div>
         <div class="library-progress" data-role="library-progress" role="progressbar" aria-label="Library videos downloaded" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round((totalCount-newCount)/totalCount*100)}" style="--library-progress:${Math.round((totalCount-newCount)/totalCount*100)}%"><span></span></div>
-      </div>
+      </div>`:''}
+    </div></div>
+    ${totalCount?`
       <div class="profile-selection-toolbar" aria-label="Video selection tools">
-        <div class="profile-selection-actions"><button class="btn-pill-action" id="btn-profile-select-all" ${!newCount || state.isBatchEnqueuing?'disabled':''}>Select new</button><button class="btn-pill-action" id="btn-profile-range" aria-pressed="false">Select range</button><button class="btn-pill-action" id="btn-profile-clear-selection">Clear</button></div>
+        <div class="profile-selection-actions"><button class="btn-pill-action profile-details-toggle" id="btn-show-library-details" aria-controls="profile-library-details" aria-expanded="false" ${state.profileDetailsCollapsed?'':'hidden'}>Details</button><button class="btn-pill-action" id="btn-profile-select-all" ${!newCount || state.isBatchEnqueuing?'disabled':''}>Select new</button><button class="btn-pill-action" id="btn-profile-range" aria-pressed="false">Select range</button><button class="btn-pill-action" id="btn-profile-clear-selection">Clear</button></div>
         <div class="profile-download-options"><label class="profile-quality-label"><span>Quality</span><select class="profile-quality-select" id="profile-quality-select" aria-label="Download quality">${[['best','Best available'],['1080','1080p'],['720','720p'],['480','480p'],['240','240p']].map(([value,label])=>`<option value="${value}" ${state.profileQuality===value?'selected':''}>${label}</option>`).join('')}</select></label>${outputFormatControl('profile-output-format')}</div>
       </div>
       <p class="profile-range-hint" data-role="profile-range-hint" role="status" ${rangeActive?'':'hidden'}>${escapeHtml(rangeHint(currentProfileSelection(),profileSelectionView()))}</p>
@@ -899,6 +904,24 @@ function renderSettingsTab() {
 function bindEvents() {
   document.querySelector('#btn-close-overlay')?.addEventListener('click',()=>window.parent.postMessage({type:'mediaflow-overlay-close'},'*'));
   const profileScroll=document.querySelector('.popup-scroll.tab-profile');
+  const profileGrid=profileScroll?.querySelector('.profile-video-grid');
+  const libraryDetails=profileScroll?.querySelector('#profile-library-details');
+  const showLibraryDetails=profileScroll?.querySelector('#btn-show-library-details');
+  function setLibraryDetailsCollapsed(collapsed) {
+    if (!libraryDetails || !showLibraryDetails || state.profileDetailsCollapsed===collapsed) return;
+    if (collapsed && libraryDetails.contains(document.activeElement)) return;
+    state.profileDetailsCollapsed=collapsed;
+    libraryDetails.classList.toggle('is-collapsed',collapsed);
+    libraryDetails.setAttribute('aria-hidden',String(collapsed));
+    libraryDetails.inert=collapsed;
+    showLibraryDetails.hidden=!collapsed;
+    if (!collapsed && document.activeElement===showLibraryDetails) profileGrid?.focus({preventScroll:true});
+  }
+  profileGrid?.addEventListener('scroll',()=>{
+    if (profileGrid.scrollTop<=1) setLibraryDetailsCollapsed(false);
+    else if (profileGrid.scrollTop>48) setLibraryDetailsCollapsed(true);
+  },{passive:true});
+  showLibraryDetails?.addEventListener('click',()=>setLibraryDetailsCollapsed(false));
   profileScroll?.addEventListener('wheel',event=>{
     const grid=profileScroll.querySelector('.profile-video-grid');
     if(!grid || !event.deltaY || event.ctrlKey || grid.contains(event.target) || event.target.closest?.('select,textarea,[contenteditable="true"]'))return;
@@ -1294,7 +1317,7 @@ async function init() {
       state.activeDomain = urlObj.hostname.replace(/^www\./, '');
     } catch (e) {}
 
-    if(!isManagedPage(state.activePageUrl))chrome.tabs.sendMessage(activeTab.id, { command: 'get_video_info' }, res => {
+    if(!isManagedPage(state.activePageUrl) && !is91PornPage(state.activePageUrl))chrome.tabs.sendMessage(activeTab.id, { command: 'get_video_info' }, res => {
       if(state.activeBrowserTabId!==activeTab.id || state.activePageUrl!==activeTab.url)return;
       if (!chrome.runtime.lastError && res && res.videoInfos?.length) {
         mergeDetectedVideos(res.videoInfos,true);
@@ -1339,4 +1362,8 @@ async function init() {
 
 // Run
 init();
-if(popupSurface.surface==='popup')openPageOverlay().then(result=>{if(result?.fallback){state.overlayUnavailable=true;render();}});
+if(popupSurface.surface==='popup' && chrome.action?.setPopup){
+  chrome.tabs.query({active:true,currentWindow:true},tabs=>{
+    if(tabs?.[0]?.id!=null)chrome.action.setPopup({tabId:tabs[0].id,popup:''}).catch(()=>{});
+  });
+}

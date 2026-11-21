@@ -2,6 +2,7 @@ import {extractMedia,decodeMediaText as decode,mediaHeight} from './media-extrac
 import {siteDefinitions} from './site-media.js';
 import {expandXPlaylist} from './x-media.js';
 import {parsePlaylist} from './hls-playlist.js';
+import {is91PornWatchPage,extract91PornPlayerMarkup} from './porn91-media.js';
 export {extractMedia} from './media-extraction.js';
 function playlistVariants(text, baseUrl) {
   const parsed=parsePlaylist(text,baseUrl);
@@ -20,8 +21,9 @@ export function chooseDefinition(definitions, preference,{preferMp4=false}={}) {
   return wanted ? sorted.find(def => height(def) === wanted) || sorted.find(def => height(def) < wanted) || sorted[0] : sorted[0];
 }
 export async function collectMediaSources(html,pageUrl,fetchText,requiredFormat) {
-  const media = extractMedia(html), definitions = [];
-  const site = await siteDefinitions(html,pageUrl,fetchText);
+  const is91Watch=is91PornWatchPage(pageUrl);
+  const media = extractMedia(is91Watch ? extract91PornPlayerMarkup(html) : html), definitions = [];
+  const site = is91Watch ? [] : await siteDefinitions(html,pageUrl,fetchText);
   for (const definition of [...site,...media.definitions]) {
     if (!definition.videoUrl) continue;
     const url = new URL(decode(definition.videoUrl),pageUrl).href;

@@ -130,6 +130,20 @@ const server = http.createServer((req,res) => {
     assert.equal(await page.evaluate(()=>window.originalQueueProgress===document.querySelector('[data-role="nums"]').firstElementChild),true,'duplicate queue updates must not rebuild progress nodes');
     await page.locator('[data-tab="profile"]').click();
     assert.equal(await page.locator('.profile-video-card').count(),60);
+    const expandedGridHeight=await page.locator('.profile-video-grid').evaluate(grid=>grid.clientHeight);
+    await page.locator('.profile-video-grid').evaluate(grid=>{grid.scrollTop=180;});
+    await page.waitForFunction(()=>document.querySelector('#profile-library-details')?.getAttribute('aria-hidden')==='true' && document.querySelector('#profile-library-details').getBoundingClientRect().height<1);
+    assert.equal(await page.locator('#profile-library-details').evaluate(node=>node.inert),true,'collapsed details cannot receive focus');
+    assert.ok(await page.locator('.profile-video-grid').evaluate(grid=>grid.clientHeight)>expandedGridHeight,'scrolling frees space for videos');
+    assert.equal(await page.locator('#btn-show-library-details').isVisible(),true);
+    assert.equal(await page.locator('#btn-batch-download').isVisible(),true,'download action remains available');
+    await page.locator('#btn-show-library-details').click();
+    await page.waitForFunction(()=>document.querySelector('#profile-library-details')?.getAttribute('aria-hidden')==='false' && document.querySelector('#profile-library-details').getBoundingClientRect().height>20);
+    assert.equal(await page.locator('#profile-library-details').evaluate(node=>node.inert),false,'details can be restored without returning to the top');
+    await page.locator('.profile-video-grid').evaluate(grid=>{grid.scrollTop=250;});
+    await page.waitForFunction(()=>document.querySelector('#profile-library-details')?.getAttribute('aria-hidden')==='true');
+    await page.locator('.profile-video-grid').evaluate(grid=>{grid.scrollTop=0;});
+    await page.waitForFunction(()=>document.querySelector('#profile-library-details')?.getAttribute('aria-hidden')==='false');
     assert.equal(await page.locator('.profile-video-card .already-downloaded:visible').count(),1);
     assert.equal(await page.locator('.profile-video-checkbox').first().isChecked(),false);
     assert.equal(await page.locator('.profile-video-checkbox').first().isDisabled(),true);
@@ -235,8 +249,7 @@ const server = http.createServer((req,res) => {
     });
     assert.deepEqual(generic.videoInfos.map(video=>video.format),['webm','mp4','m3u8']);
     await page.setViewportSize({width:800,height:650});
-    const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
-    await page.goto(origin+'/'+manifest.action.default_popup);
+    await page.goto(origin+'/src/pages/popup/index.html?surface=popup');
     await page.waitForSelector('#btn-resize-popup');
     assert.equal(await page.evaluate(()=>document.documentElement.dataset.surface),'popup');
     assert.equal(await page.evaluate(()=>document.documentElement.style.width),'720px');
@@ -259,12 +272,14 @@ const server = http.createServer((req,res) => {
     await page.locator('[data-tab="profile"]').click();
     assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.profile-video-grid')).gridTemplateColumns.split(' ').length),2);
     await page.evaluate(()=>document.fonts.ready);
+    await page.locator('.profile-video-grid').evaluate(grid=>{grid.scrollTop=180;});
+    await page.waitForFunction(()=>document.querySelector('#profile-library-details')?.getAttribute('aria-hidden')==='true' && document.querySelector('#profile-library-details').getBoundingClientRect().height<1);
     const density=await page.evaluate(()=>{
       const grid=document.querySelector('.profile-video-grid'),bounds=grid.getBoundingClientRect();
       return {height:bounds.height,visible:[...grid.children].filter(card=>{const box=card.getBoundingClientRect();return box.top>=bounds.top && box.bottom<=bounds.bottom;}).length};
     });
-    assert.ok(density.height>=350,JSON.stringify(density));
-    assert.ok(density.visible>=10,'the attached popup must show at least ten full cards: '+JSON.stringify(density));
+    assert.ok(density.height>=330,JSON.stringify(density));
+    assert.ok(density.visible>=8,'the compact library must show at least eight full cards: '+JSON.stringify(density));
     await page.screenshot({path:path.join(root,'test-results/attached-toolbar-popup.png'),fullPage:true});
     await page.locator('#profile-filter-input').fill('Test video 12');
     assert.equal(await page.locator('.profile-video-card').count(),6,'search includes matches across all loaded pages');

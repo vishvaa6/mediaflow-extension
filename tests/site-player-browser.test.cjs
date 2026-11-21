@@ -18,6 +18,9 @@ const cases=[
     }},
   {page:'https://www.pornhub.org/view_video.php?viewkey=sample',html:player+preview+'<script>var flashvars_1={"mediaDefinitions":[{"format":"mp4","videoUrl":"/api/streams"}]};</script>',
     quality:'480p MP4',url:source('ph-480'),replies:{'https://www.pornhub.org/api/streams':JSON.stringify([{quality:480,videoUrl:source('ph-480')},{quality:720,videoUrl:source('ph-720')}])}},
+  ...['view_video.php','view_video_hd.php'].map(pathname=>({page:`https://91porn.com/${pathname}?viewkey=example`,
+    html:preview+`<div class="video-js"><video id="player_one_html5_api" width="420" height="240" preload="none"><source src="${source('91-main')}?token=a%2Bb" type="video/mp4"></video></div>`,
+    quality:'Auto MP4',url:source('91-main')+'?token=a%2Bb',check91:true})),
   ...['xvideos.com','xnxx.es'].map(host=>({page:`https://${host}/video123/example`,
     html:player+preview+'<script type="text/plain">html5player.setVideoUrlLow("https://cdn.test/low.mp4");html5player.setVideoUrlHigh("https://cdn.test/high.mp4");</script>',quality:'480p MP4',url:source('low')})),
   {page:'https://xhamster42.desi/videos/sample',html:config({xplayerSettings:{sources:{standard:{h264:[{url:source('xh'),quality:'720p'}]}}}}),
@@ -39,6 +42,7 @@ const cases=[
   try{
     const page=await browser.newPage({viewport:{width:640,height:480}});
     const fixtures=new Map(cases.map(test=>[test.page,test]));
+    fixtures.set('https://91porn.com/index.php',{html:preview});
     const loader='<link rel="stylesheet" href="/assets/css/player-download.css"><script type="module">import {installMediaDetection} from "/assets/js/media-detection.js";installMediaDetection();</script>';
     await page.route('**/*',async route=>{
       const url=new URL(route.request().url()),test=fixtures.get(url.href);
@@ -86,8 +90,17 @@ const cases=[
       await page.waitForFunction(()=>enqueues.length===1);
       const request=await page.evaluate(()=>enqueues[0]);
       assert.equal(request.url,test.url,test.page);assert.equal(request.pageUrl,test.page);
+      if(test.check91){
+        assert.deepEqual(request.headers,{Referer:test.page,Origin:'https://91porn.com'});
+        const snapshot=await page.evaluate(async()=>{const {detectDocumentMedia}=await import('/assets/js/media-detection.js');return detectDocumentMedia().videoInfos.map(video=>video.videoUrl);});
+        assert.deepEqual(snapshot,[test.url],'91porn detection must exclude preview clips');
+      }
       if(test.headers)assert.deepEqual(request.headers,test.headers);
       console.log(`PASS: download button and selected source for ${new URL(test.page).hostname}`);
     }
+    await page.goto('https://91porn.com/index.php');
+    await page.waitForTimeout(500);
+    assert.equal(await page.locator('.mediaflow-download-pill').count(),0,'homepage previews must not get download buttons');
+    assert.deepEqual(await page.evaluate(async()=>{const {detectDocumentMedia}=await import('/assets/js/media-detection.js');return detectDocumentMedia().videoInfos;}),[]);
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

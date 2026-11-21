@@ -3,8 +3,20 @@ import assert from 'node:assert/strict';
 import {extractMedia,resolveMedia} from '../assets/js/media-resolver.js';
 import {mediaHeaders,exactRequestCondition} from '../assets/js/media-headers.js';
 import {createMediaDiscovery} from '../assets/js/media-discovery.js';
+import {is91PornPage,is91PornWatchPage} from '../assets/js/porn91-media.js';
 
 const master='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100,RESOLUTION=1280x720\n720/list.m3u8?sig=fresh\n#EXT-X-STREAM-INF:BANDWIDTH=200,RESOLUTION=1920x1080\n1080/list.m3u8?sig=fresh';
+test('91porn watch pages resolve their video source with signed URLs intact',async()=>{
+  for(const path of ['view_video.php','view_video_hd.php']){
+    const page=`https://91porn.com/${path}?viewkey=example`;
+    assert.equal(is91PornWatchPage(page),true);
+    const result=await resolveMedia('<video src="https://cdn.test/preview.mp4"></video><video id="player_one_html5_api"><source type="video/mp4" src="https://cdn.test/video.mp4?token=a%2Bb&amp;id=1"></video>',page,'best',async()=>assert.fail());
+    assert.equal(result.url,'https://cdn.test/video.mp4?token=a%2Bb&id=1');
+    await assert.rejects(resolveMedia('<video src="https://cdn.test/preview.mp4"></video>',page,'best',async()=>assert.fail()),/No supported video stream/);
+  }
+  assert.equal(is91PornPage('https://91porn.com.evil.test/index.php'),false);
+  assert.equal(is91PornWatchPage('https://91porn.com/index.php'),false);
+});
 test('123av refresh resolves the player API with its token and keeps iframe headers on quality variants',async()=>{
   const calls=[];
   const result=await resolveMedia('<title>Example</title><iframe class="player__frame" src="https://javplayer.cc/e/abc_123?token=a%2Bb&amp;expires=123"></iframe>','https://123av.com/en/v/example','720p',async(url,headers)=>{

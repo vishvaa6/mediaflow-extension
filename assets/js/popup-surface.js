@@ -19,7 +19,30 @@ export function createPopupSurface(){
   if(surface==='popup')apply(size);
   const ready=surface==='popup'?chrome.storage.local.get('mediaflowPopupSize').then(saved=>apply(saved.mediaflowPopupSize || size)).catch(()=>{}):Promise.resolve();
   function bindResize(handle){
-    if(!handle || surface!=='popup')return;
+    if(!handle)return;
+    if(surface==='overlay'){
+      let drag;
+      const send=(dx,dy,commit=false,reset=false)=>window.parent.postMessage({type:'mediaflow-overlay-resize',dx,dy,commit,reset},'*');
+      handle.addEventListener('pointerdown',event=>{
+        if(event.button!==0)return;
+        event.preventDefault();handle.focus({preventScroll:true});
+        drag={x:event.screenX,y:event.screenY};handle.setPointerCapture(event.pointerId);
+      });
+      handle.addEventListener('pointermove',event=>{
+        if(!drag)return;
+        send(event.screenX-drag.x,event.screenY-drag.y);
+        drag={x:event.screenX,y:event.screenY};
+      });
+      const end=()=>{if(drag){drag=undefined;send(0,0,true);}};
+      for(const event of ['pointerup','pointercancel','lostpointercapture'])handle.addEventListener(event,end);
+      handle.addEventListener('keydown',event=>{
+        const delta={ArrowLeft:[-20,0],ArrowRight:[20,0],ArrowUp:[0,-20],ArrowDown:[0,20]}[event.key];
+        if(!delta && event.key!=='Home')return;
+        event.preventDefault();send(delta?.[0] || 0,delta?.[1] || 0,true,event.key==='Home');
+      });
+      return;
+    }
+    if(surface!=='popup')return;
     let drag;
     const end=()=>{drag=undefined;document.documentElement.classList.remove('popup-resizing');persist();};
     handle.addEventListener('pointerdown',event=>{

@@ -29,10 +29,10 @@ gradle assembleDebug
 
 The debug-signed APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. It is for local testing, not a store-signed release. Install it on the phone and allow installation from the source used to open the APK if Android asks.
 
-## Attached popup and MP4 output
+## MediaFlow panel and MP4 output
 
 - Choose **Save as → MP4 (fast)** beside the quality options in Downloads or the Library selection toolbar. The choice is remembered and included explicitly in single-video and batch requests. Compatible HLS segments convert to MP4 in playlist order while later segments download, reducing the conversion work left after transfer. The queue shows **Downloading + MP4**. Conversion preserves the encoded video/audio quality; actual completion time depends on transfer speed, storage and video size. Native MP4 saves directly. WebM and unsupported codecs retain their original format with an explanation. Choose **Original format** to skip conversion.
-- Click the toolbar icon to open MediaFlow attached to the browser toolbar. It opens at 720×600 by default. Drag the bottom-right grip to resize within Chrome's 800×600 popup limit; the popup size is remembered. Arrow keys resize the focused grip, and Home restores the default size. Smaller displays are respected. Use **Open full view in a browser tab** in the header for more space. MediaFlow does not open a separate window or resize the browser window. Detection follows the source website in the originating browser window.
+- Click the toolbar icon to open MediaFlow as a rounded panel over the current page. Drag its lower-left grip to resize it; the size is remembered and kept within the viewport. Focus the grip and use the arrow keys to resize or Home to restore the default. Click outside the panel or press Escape to close it. If a page blocks the panel or cannot be accessed by extensions, MediaFlow opens the toolbar popup, which has its own resize grip and Chrome's size limits. On Chrome versions before 127, click the toolbar icon again to open this fallback. Use **Open full view in a browser tab** in the header when needed. Detection follows the source website in the originating browser window.
 - **Library** gives loaded profile videos most of the popup height and keeps selection totals and Download visible at the bottom. Source setup collapses after a scan; click **Source** to change the URL, fetch again or clear results. Compact cards show readable titles, thumbnails and separate download status. The default 720×600 fixture library now shows ten full cards (eight when a batch summary or range hint is present), with two columns from 640px and three in the full browser tab from 1100px. **Search loaded videos** searches titles across all loaded pages without changing the library selection; the footer reminds you when selection includes hidden videos. Selection, page, scroll position and keyboard focus survive progress updates. Selected cards have rounded indigo borders. Poppins, Montserrat and Lucide SVG icons are bundled locally with their licenses.
 - **Downloads** shows a compact source preview and quality choices beside the queue from 640px wide, so transfer status stays in view. Narrow popups stack these panels. Queue rows keep pause, resume, retry, error details and progress together.
 - Large queues show 30 downloads at a time; use the queue's previous and next buttons to reach the rest. This keeps the popup responsive without changing the underlying downloads.
@@ -130,6 +130,7 @@ The tests use synthetic pages and video data. Account-specific pages, CAPTCHA re
 | X / Twitter | Post-scoped API variants, public embed metadata, MP4/GIF/HLS sources, quality selection, video index, stable history and expired MP4 renewal |
 | 123av | Embedded player ID/token, stream API, HLS variants, player headers |
 | Pornhub | Flashvars, MP4 metadata endpoints, HLS variants |
+| 91porn | HTML5 watch-page player, signed MP4 sources, download controls and preview filtering |
 | XVideos / XNXX | High/Low/HLS player sources |
 | XHamster | JSON player sources |
 | Redtube | JSON configuration and MP4 metadata endpoints |
