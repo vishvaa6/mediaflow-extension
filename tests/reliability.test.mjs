@@ -121,5 +121,5 @@ test('toolbar opens an attached popup; source tracking never registers a detache
   const manager=installWindowManager();
   assert.equal(clicked.length,0);assert.equal((await manager.source(2)).tab.id,5);assert.equal(data.mediaflowSource.tabId,5);
   const manifest=JSON.parse(readFileSync(new URL('../manifest.json',import.meta.url),'utf8'));
-  assert.equal(manifest.action.default_popup,'src/pages/popup/index.html?surface=popup');
+  assert.equal(manifest.action.default_popup,undefined,'toolbar clicks launch the panel without first opening a popup');
 });

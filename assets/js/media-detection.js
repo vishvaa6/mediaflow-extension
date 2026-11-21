@@ -5,6 +5,7 @@ import {installXDetection} from './x-detection.js';
 import {installMissavDetection} from './missav-detection.js';
 import {installGenericPlayerDetection} from './generic-player-detection.js';
 import {notifyIfContextInvalid} from './extension-context.js';
+import {is91PornPage,is91PornWatchPage,find91PornPlayer} from './porn91-media.js';
 
 const videoResource=/\.(?:m3u8|mp4|webm)(?:[?#]|$)/i;
 
@@ -19,6 +20,14 @@ export function detectDocumentMedia(doc=document,baseUrl=location.href,timing=pe
       if(!old || old.quality==='Auto')found.set(url.href,video);
     }catch{}
   };
+  if(is91PornPage(baseUrl)){
+    const player=is91PornWatchPage(baseUrl) ? find91PornPlayer(doc) : null;
+    if(player){
+      if(player.currentSrc || player.getAttribute('src'))add(player.currentSrc || player.getAttribute('src'),player.videoHeight,player.getAttribute('type'));
+      for(const source of player.querySelectorAll('source[src]'))add(source.getAttribute('src'),source.getAttribute('size') || source.getAttribute('label'),source.getAttribute('type'));
+    }
+    return {pageUrl:baseUrl,...getVideoMetadata(doc,baseUrl),videoInfos:[...found.values()]};
+  }
   for(const video of doc.querySelectorAll('video'))if(video.currentSrc || video.getAttribute('src'))add(video.currentSrc || video.getAttribute('src'),video.videoHeight,video.getAttribute('type'));
   for(const definition of extractMedia(doc.documentElement?.outerHTML || '').definitions)if(!definition.isMetadata)add(definition.videoUrl,definition.quality,definition.format,definition.headers);
   for(const entry of timing?.getEntriesByType?.('resource') || []){

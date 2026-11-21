@@ -1,11 +1,12 @@
 import {xPost} from './x-media.js';
 import {missavVideoPage} from './missav-media.js';
+import {is91PornWatchPage} from './porn91-media.js';
 
 export function recognizedVideoPage(value){
   try{
     const url=new URL(value);
     if(!/^https?:$/.test(url.protocol))return false;
-    return !!missavVideoPage(value) || !!xPost(value) || /view_video\.php/.test(url.pathname) && url.searchParams.has('viewkey') || /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(?:video[.\d]|videos?\/|v\/)/i.test(url.pathname) || /^(?:www\.)?redtube\.com$/i.test(url.hostname) && /^\/\d+\/?$/.test(url.pathname);
+    return is91PornWatchPage(value) || !!missavVideoPage(value) || !!xPost(value) || /view_video\.php/.test(url.pathname) && url.searchParams.has('viewkey') || /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(?:video[.\d]|videos?\/|v\/)/i.test(url.pathname) || /^(?:www\.)?redtube\.com$/i.test(url.hostname) && /^\/\d+\/?$/.test(url.pathname);
   }catch{return false;}
 }
 
