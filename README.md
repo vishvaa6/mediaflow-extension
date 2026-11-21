@@ -2,7 +2,7 @@
 
 MediaFlow is a browser extension for detecting and downloading supported videos, managing creator batches, and resuming interrupted downloads. The repository root is the runnable, unpacked extension; no build step is required for the extension.
 
-## Install v1.3.0
+## Install v1.3.1
 
 Download the extension ZIP from [GitHub Releases](https://github.com/vishvaa6/mediaflow-extension/releases), extract it into a permanent folder, then enable Developer mode on `chrome://extensions` (Chrome) or `brave://extensions` (Brave). Click **Load unpacked** and select the folder containing `manifest.json`.
 

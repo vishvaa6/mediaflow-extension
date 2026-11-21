@@ -1,4 +1,12 @@
-# Unreleased - MP4 playback repair and queue memory control
+# MediaFlow v1.3.1
+
+- Added 91porn watch-page player detection and download controls, with signed URL preservation and preview filtering.
+- Redesigned download progress cards and added a resizable rounded panel with a lighter glass appearance. A toolbar popup remains available when the page blocks the panel.
+- Library details collapse while scrolling to make more room for videos, with an animated transition and accessible reduced-motion behavior.
+- Improved download recovery, queue memory controls, and conventional MP4 finalization as detailed below.
+- Validated with the core test suite and browser fixtures. Site-specific checks use synthetic pages; access and player behavior can vary on live sites.
+
+## MP4 playback repair and queue memory control
 
 - Finalize TS and fragmented HLS as conventional MP4 with complete sample tables, track durations, composition timing and keyframe indexes. Handle repeated AAC priming samples at discontinuities; preserve encoded audio/video and write media directly to disk. Release converter metadata when finished or paused.
 - Invalidate the older fragmented-output cache so Retry rebuilds from retained source segments. Unsafe MP4 finalization reports an error with the cache retained; unsupported TS/WebM conversion keeps its original format.
