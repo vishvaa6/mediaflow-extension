@@ -5,6 +5,8 @@ import {mediaHeaders} from './media-headers.js';
 import {visibleArea} from './viewport.js';
 import {recognizedVideoPage} from './video-details.js';
 import {is91PornPage,is91PornWatchPage,find91PornPlayer} from './porn91-media.js';
+import {isXPage} from './x-media.js';
+import {isMissavPage} from './missav-media.js';
 
 const videoPath=/\.(?:mp4|webm|m3u8)(?:[?#]|$)/i;
 const unsupportedType=/^(?:audio|image)\/|dash\+xml/i;
@@ -33,9 +35,9 @@ function nativePlayerControls(video){
   return fallback;
 }
 
-function visibleToolbarAnchor(anchor){
-  if(!anchor || anchor.closest('[aria-hidden="true"],[inert]') || getComputedStyle(anchor).pointerEvents==='none')return null;
-  return visibleArea(anchor) ? anchor : null;
+function visibleToolbarAnchor(anchor,view=globalThis.window){
+  if(!anchor || anchor.closest?.('[aria-hidden="true"],[inert]') || view?.getComputedStyle?.(anchor)?.pointerEvents==='none')return null;
+  return visibleArea(anchor,view) ? anchor : null;
 }
 
 function mediaUrl(value,base){
@@ -50,15 +52,23 @@ function siteHostname(value){
   try{return new URL(value).hostname.replace(/^www\./,'');}catch{return '';}
 }
 
-function embedded123avPlayer(){
-  return window.top!==window && siteHostname(location.href)==='javplayer.cc' &&
-    [document.referrer,...Array.from(location.ancestorOrigins || [])].some(url=>siteHostname(url)==='123av.com');
+function embedded123avPlayer(url,win=globalThis.window,doc=globalThis.document){
+  if(!win || !doc || win.top===win)return false;
+  const href=url || win.location?.href || '';
+  return siteHostname(href)==='javplayer.cc' &&
+    [doc.referrer,...Array.from(win.location?.ancestorOrigins || [])].some(origin=>siteHostname(origin)==='123av.com');
 }
 
-function mainWatchPlayer(host,players){
-  if(is91PornPage(location.href))return find91PornPlayer(document);
+function matchesGenericPlayer(url=globalThis.location?.href || ''){
+  if(!url)return false;
+  try{if(!/^https?:$/.test(new URL(url).protocol))return false;}catch{return false;}
+  return !isXPage(url) && !isMissavPage(url) && !embedded123avPlayer(url);
+}
+
+function mainWatchPlayer(host,players,doc=document,pageUrl=location.href){
+  if(is91PornPage(pageUrl))return find91PornPlayer(doc);
   if(host==='123av.com'){
-    const frame=[...document.querySelectorAll('iframe[src]')].find(element=>
+    const frame=[...doc.querySelectorAll('iframe[src]')].find(element=>
       siteHostname(element.src)==='javplayer.cc' && /^\/e\/[\w]+\/?$/.test(new URL(element.src).pathname));
     if(frame)return frame;
   }
@@ -90,51 +100,59 @@ function elementSources(player,pageUrl){
   return [...sources.values()];
 }
 
+export function collectGenericPlayers(doc=globalThis.document,pageUrl=globalThis.location?.href || '',context={}){
+  if(!doc || !pageUrl)return [];
+  const view=context?.view ?? (context?.innerWidth!=null ? context : globalThis.window);
+  const encrypted=context?.encrypted;
+  const pageSnapshot=context?.pageSnapshot;
+  const host=siteHostname(pageUrl);
+  let pathname='';
+  try{pathname=new URL(pageUrl).pathname;}catch{}
+  const players=[...doc.querySelectorAll('video:not(.preview):not([id^="preview-"])')];
+  const topPage=context.topPage ?? (!view || view.top===view);
+  if(topPage && is91PornPage(pageUrl) && !is91PornWatchPage(pageUrl))return [];
+  const supportedSite=sitePlayer.test(host);
+  const watchPage=topPage && supportedSite && (recognizedVideoPage(pageUrl) || host==='huangguoai.com' && /^\/detail\/\d+(?:\/|$)/.test(pathname));
+  const main=watchPage ? mainWatchPlayer(host,players,doc,pageUrl) : null;
+  if(main?.matches('video') && (main.mediaKeys || encrypted?.has(main)))return [];
+  const metadataOnly=topPage && !watchPage && !players.length && !doc.querySelector('iframe') && pageSnapshot?.pageUrl===pageUrl &&
+    pageSnapshot.videoInfos.filter(source=>videoPath.test(source.videoUrl)).length===1 &&
+    (doc.querySelector('meta[property="og:type"][content^="video" i]') ||
+      [...doc.querySelectorAll('script[type="application/ld+json"]')].some(script=>/"@type"\s*:\s*"VideoObject"/.test(script.textContent)));
+  const usingPageButton=watchPage && doc.querySelector('body > .mediaflow-download-pill[data-page-download]:is(:hover,:focus-within,[data-menu-open])');
+  const pageButton=Boolean((watchPage && (!main || !visibleArea(main,view) || usingPageButton) || metadataOnly) && doc.body);
+  const candidates=pageButton ? [doc.body] : watchPage ? (main?[main]:[]) : players;
+  const entries=[];
+  for(const element of candidates){
+    const video=element.matches('video');
+    if(!pageButton){
+      const {width,height}=element.getBoundingClientRect();
+      if(element.mediaKeys || encrypted?.has(element) || width<80 || height<44 || !visibleArea(element,view))continue;
+    }
+    const direct=video ? elementSources(element,pageUrl) : [];
+    const raw=pageButton ? '' : element.getAttribute('src') || element.querySelector('source[src]')?.getAttribute('src') || element.currentSrc || '';
+    const nativeControls=video ? nativePlayerControls(element) : null;
+    const canResolve=watchPage || pageButton || Boolean(nativeControls) || players.length===1 && (supportedSite || !direct.length && (raw.startsWith('blob:') || raw===''));
+    if(!direct.length && !canResolve)continue;
+    const poster=mediaUrl(element.getAttribute('poster'),pageUrl);
+    const sourceKey=JSON.stringify([pageUrl,pageButton?'page':raw,poster,direct.map(source=>source.videoUrl)]);
+    const title=element.getAttribute('aria-label') || (pageSnapshot?.pageUrl===pageUrl && pageSnapshot.pageTitle) || doc.title || 'Video';
+    entries.push({element,pageUrl,sourceKey,poster,title,direct,canResolve,pageButton,watchPage,
+      overlayHost:nativeControls?.host,toolbarAnchor:visibleToolbarAnchor(nativeControls?.anchor,view)});
+    if(entries.length===16)break;
+  }
+  return entries;
+}
+
 export function installGenericPlayerDetection(){
   // The outer watch page owns the button for this embed and can resolve its token.
-  if(embedded123avPlayer())return null;
+  if(embedded123avPlayer(location.href))return null;
   const encrypted=new WeakSet(),resolved=new Map(),pending=new Map();
   const watched=new Set();
   const resizeObserver=typeof ResizeObserver==='function' ? new ResizeObserver(schedule) : null;
   let pageSnapshot,frame=0;
 
-  function visiblePlayers(){
-    const pageUrl=location.href,host=siteHostname(pageUrl);
-    const players=[...document.querySelectorAll('video:not(.preview):not([id^="preview-"])')];
-    const topPage=window.top===window;
-    if(topPage && is91PornPage(pageUrl) && !is91PornWatchPage(pageUrl))return [];
-    const supportedSite=sitePlayer.test(host);
-    const watchPage=topPage && supportedSite && (recognizedVideoPage(pageUrl) || host==='huangguoai.com' && /^\/detail\/\d+(?:\/|$)/.test(location.pathname));
-    const main=watchPage ? mainWatchPlayer(host,players) : null;
-    if(main?.matches('video') && (main.mediaKeys || encrypted.has(main)))return [];
-    const metadataOnly=topPage && !watchPage && !players.length && !document.querySelector('iframe') && pageSnapshot?.pageUrl===pageUrl &&
-      pageSnapshot.videoInfos.filter(source=>videoPath.test(source.videoUrl)).length===1 &&
-      (document.querySelector('meta[property="og:type"][content^="video" i]') ||
-        [...document.querySelectorAll('script[type="application/ld+json"]')].some(script=>/"@type"\s*:\s*"VideoObject"/.test(script.textContent)));
-    const usingPageButton=watchPage && document.querySelector('body > .mediaflow-download-pill[data-page-download]:is(:hover,:focus-within,[data-menu-open])');
-    const pageButton=Boolean((watchPage && (!main || !visibleArea(main) || usingPageButton) || metadataOnly) && document.body);
-    const candidates=pageButton ? [document.body] : watchPage ? (main?[main]:[]) : players;
-    const entries=[];
-    for(const element of candidates){
-      const video=element.matches('video');
-      if(!pageButton){
-        const {width,height}=element.getBoundingClientRect();
-        if(element.mediaKeys || encrypted.has(element) || width<80 || height<44 || !visibleArea(element))continue;
-      }
-      const direct=video ? elementSources(element,pageUrl) : [];
-      const raw=pageButton ? '' : element.getAttribute('src') || element.querySelector('source[src]')?.getAttribute('src') || element.currentSrc || '';
-      const nativeControls=video ? nativePlayerControls(element) : null;
-      const canResolve=watchPage || pageButton || Boolean(nativeControls) || players.length===1 && (supportedSite || !direct.length && (raw.startsWith('blob:') || raw===''));
-      if(!direct.length && !canResolve)continue;
-      const poster=mediaUrl(element.getAttribute('poster'),pageUrl);
-      const sourceKey=JSON.stringify([pageUrl,pageButton?'page':raw,poster,direct.map(source=>source.videoUrl)]);
-      const title=element.getAttribute('aria-label') || (pageSnapshot?.pageUrl===pageUrl && pageSnapshot.pageTitle) || document.title || 'Video';
-      entries.push({element,pageUrl,sourceKey,poster,title,direct,canResolve,pageButton,watchPage,
-        overlayHost:nativeControls?.host,toolbarAnchor:visibleToolbarAnchor(nativeControls?.anchor)});
-      if(entries.length===16)break;
-    }
-    return entries;
-  }
+  const visiblePlayers=()=>genericPlayerDetector.collect(document,location.href,{encrypted,pageSnapshot,view:window});
 
   function variants(entry){
     const videos=new Map();
@@ -238,3 +256,10 @@ export function installGenericPlayerDetection(){
   schedule();
   return {update(result){pageSnapshot=result;schedule();}};
 }
+
+export const genericPlayerDetector = Object.freeze({
+  id: 'generic-player',
+  matches: matchesGenericPlayer,
+  collect: collectGenericPlayers,
+  install: installGenericPlayerDetection
+});
