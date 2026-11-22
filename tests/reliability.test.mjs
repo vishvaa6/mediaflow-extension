@@ -4,6 +4,7 @@ import {fetchBytes,transientError,retryAfterMs,retryDelay,abortableSleep,withRet
 import {HlsDownloader} from '../assets/js/hls-downloader.js';
 import {DirectDownloader} from '../assets/js/direct-downloader.js';
 import {OffscreenDownload} from '../assets/js/offscreen-client.js';
+import {batchProgress} from '../assets/js/batch-progress.js';
 import {installWindowManager} from '../assets/js/window-manager.js';
 import {clampPopupSize} from '../assets/js/popup-surface.js';
 import {readFileSync} from 'node:fs';
@@ -463,4 +464,24 @@ test('HlsDownloader retries playlist HTTP 429 and OffscreenDownload forwards ret
   assert.equal(forwarded[2].retrying,true);assert.equal(forwarded[2].retryAttempt,2);
   assert.equal(forwarded[3].retrying,false);assert.equal(forwarded[3].retryAt,undefined);assert.equal(forwarded[3].retryAttempt,undefined);assert.equal(forwarded[3].phase,'downloading');
   assert.equal(client.getBytesReceived(),200);
+});
+
+test('batchProgress counts retrying tasks as active and keeps the batch unfinished',()=>{
+  const batch={id:'b1',status:'complete',total:3,processed:3,skipped:0,failed:0};
+  const summary=batchProgress(batch,[
+    {id:'t1',batchId:'b1',status:'retrying',retryAt:Date.now()+2000,retryAttempt:1,retryMax:4},
+    {id:'t2',batchId:'b1',status:'downloading'},
+    {id:'other',batchId:'b2',status:'retrying'}
+  ],[{id:'t3',batchId:'b1'}]);
+  assert.equal(summary.counts.active,2);
+  assert.equal(summary.counts.completed,1);
+  assert.equal(summary.finished,false);
+  assert.match(summary.text,/2 active/);
+
+  const onlyRetrying=batchProgress({id:'b1',status:'complete',total:1,processed:1,skipped:0,failed:0},[
+    {id:'t1',batchId:'b1',status:'retrying'}
+  ],[]);
+  assert.equal(onlyRetrying.counts.active,1);
+  assert.equal(onlyRetrying.finished,false);
+  assert.notEqual(onlyRetrying.label,'All downloads completed');
 });
