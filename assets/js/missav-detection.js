@@ -26,11 +26,11 @@ export function visibleMissavEntries(doc=document,pageUrl=location.href,view=win
 }
 
 export function installMissavDetection(onUpdate){
-  if(!isMissavPage(location.href))return null;
+  if(!missavDetector.matches(location.href))return null;
   const cache=new Map(),pending=new Map(),watched=new Set();
   let timer;
   function snapshot(){
-    const entries=visibleMissavEntries(),videos=new Map(),errors=[];
+    const entries=missavDetector.collect(),videos=new Map(),errors=[];
     for(const entry of entries){
       const result=cache.get(entry.pageUrl);
       for(const video of result?.videos || [])videos.set(video.pageUrl+'|'+video.videoUrl,video);
@@ -61,7 +61,7 @@ export function installMissavDetection(onUpdate){
     }
   }
   const variants=entry=>cache.get(entry.pageUrl)?.videos || [];
-  const buttons=createPlayerDownloadButtons({variants,visiblePlayers:visibleMissavEntries,pageScoped:true,expandPlaylist:null,
+  const buttons=createPlayerDownloadButtons({variants,visiblePlayers:()=>missavDetector.collect(),pageScoped:true,expandPlaylist:null,
     loadEntry:entry=>loadEntry(entry),needsLoad:entry=>pending.has(entry.pageUrl) || !cache.has(entry.pageUrl),
     unavailable:entry=>cache.get(entry.pageUrl)?.error});
 
@@ -85,13 +85,13 @@ export function installMissavDetection(onUpdate){
       finally{
         if(pending.get(entry.pageUrl)===job)pending.delete(entry.pageUrl);
         while(cache.size>48)cache.delete(cache.keys().next().value);
-        buttons.sync(visibleMissavEntries());onUpdate();schedule();
+        buttons.sync(missavDetector.collect());onUpdate();schedule();
       }
     })();
     return job.promise;
   }
   function refresh(force=false){
-    const entries=visibleMissavEntries(),active=new Set(entries.map(entry=>entry.pageUrl)),elements=new Set(entries.map(entry=>entry.element));
+    const entries=missavDetector.collect(),active=new Set(entries.map(entry=>entry.pageUrl)),elements=new Set(entries.map(entry=>entry.element));
     for(const [url,job] of pending)if(!active.has(url)){job.controller.abort();pending.delete(url);}
     for(const element of watched)if(!elements.has(element)){intersection?.unobserve(element);watched.delete(element);}
     for(const element of elements)if(!watched.has(element)){intersection?.observe(element);watched.add(element);}
@@ -112,3 +112,11 @@ export function installMissavDetection(onUpdate){
   document.addEventListener('play',schedule,true);
   refresh();return {snapshot,refresh};
 }
+
+export const missavDetector = Object.freeze({
+  id: 'missav',
+  matches: isMissavPage,
+  collect: (doc = globalThis.document, url = globalThis.location?.href || '', context) =>
+    visibleMissavEntries(doc, url, context?.view ?? (context?.innerWidth != null ? context : globalThis.window)),
+  install: installMissavDetection
+});

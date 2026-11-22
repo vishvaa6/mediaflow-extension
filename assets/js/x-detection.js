@@ -4,7 +4,7 @@ import {createPlayerDownloadButtons,fetchPlayerText} from './player-download-but
 import {affectsPage} from './extension-mutations.js';
 
 export function installXDetection(onUpdate) {
-  if(!isXPage(location.href))return null;
+  if(!xDetector.matches(location.href))return null;
   let observed={},timer,lastRequest='';
   const publicCache=new Map(),pending=new Map(),watched=new Set();
   const key=entry=>entry.postId+':'+entry.index;
@@ -31,14 +31,14 @@ export function installXDetection(onUpdate) {
   }
   function snapshot(){
     const videos=new Map();
-    for(const entry of visibleXPlayers())for(const video of variants(entry))videos.set(video.pageUrl+'|'+video.videoUrl,video);
+    for(const entry of xDetector.collect())for(const video of variants(entry))videos.set(video.pageUrl+'|'+video.videoUrl,video);
     const videoInfos=[...videos.values()].slice(0,64);
     return {site:'x',viewport:true,pageUrl:location.href,pageTitle:videoInfos[0]?.title || document.title,
       thumbnail:videoInfos[0]?.thumbnail || '',thumbnails:videoInfos[0]?.thumbnails || [],videoInfos};
   }
   function schedule(){if(!timer)timer=setTimeout(()=>{timer=null;refresh();},100);}
   const intersection=typeof IntersectionObserver!=='undefined'?new IntersectionObserver(schedule,{threshold:[0,0.01,0.25,0.5,1]}):null;
-  const buttons=createPlayerDownloadButtons({variants,loadEntry,visiblePlayers:visibleXPlayers,pageScoped:true,
+  const buttons=createPlayerDownloadButtons({variants,loadEntry,visiblePlayers:()=>xDetector.collect(),pageScoped:true,
     expandPlaylist:video=>expandXPlaylist(video,fetchPlayerText)});
   function loadEntry(entry){
     const cacheKey=key(entry);
@@ -55,7 +55,7 @@ export function installXDetection(onUpdate) {
     pending.set(cacheKey,job);return job;
   }
   function refresh(force=false){
-    const entries=visibleXPlayers(),elements=new Set(entries.map(entry=>entry.element));
+    const entries=xDetector.collect(),elements=new Set(entries.map(entry=>entry.element));
     for(const element of watched)if(!elements.has(element)){intersection?.unobserve(element);watched.delete(element);}
     for(const element of elements)if(!watched.has(element)){watched.add(element);intersection?.observe(element);}
     const postIds=[...new Set(entries.map(entry=>entry.postId))];
@@ -75,7 +75,7 @@ export function installXDetection(onUpdate) {
   }
   document.addEventListener('mediaflow:x:media',event=>{
     if(typeof event.detail!=='string' || event.detail.length>512*1024)return;
-    try{observed=JSON.parse(event.detail);buttons.sync(visibleXPlayers());onUpdate();}catch{}
+    try{observed=JSON.parse(event.detail);buttons.sync(xDetector.collect());onUpdate();}catch{}
   });
   document.addEventListener('mediaflow:x:navigate',schedule);
   for(const type of ['play','pause','loadedmetadata','fullscreenchange'])document.addEventListener(type,schedule,true);
@@ -87,3 +87,11 @@ export function installXDetection(onUpdate) {
   refresh();
   return {snapshot,refresh};
 }
+
+export const xDetector = Object.freeze({
+  id: 'x',
+  matches: isXPage,
+  collect: (doc = globalThis.document, url = globalThis.location?.href || '', context) =>
+    visibleXPlayers(doc, url, context?.view ?? (context?.innerWidth != null ? context : globalThis.window)),
+  install: installXDetection
+});

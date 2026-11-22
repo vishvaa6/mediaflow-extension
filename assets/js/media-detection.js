@@ -1,13 +1,40 @@
 import {extractMedia,mediaFormat,mediaHeight} from './media-extraction.js';
 import {mediaHeaders} from './media-headers.js';
 import {getVideoMetadata} from './video-details.js';
-import {installXDetection} from './x-detection.js';
-import {installMissavDetection} from './missav-detection.js';
-import {installGenericPlayerDetection} from './generic-player-detection.js';
+import {xDetector} from './x-detection.js';
+import {missavDetector} from './missav-detection.js';
+import {genericPlayerDetector} from './generic-player-detection.js';
 import {notifyIfContextInvalid} from './extension-context.js';
 import {is91PornPage,is91PornWatchPage,find91PornPlayer} from './porn91-media.js';
 
 const videoResource=/\.(?:m3u8|mp4|webm)(?:[?#]|$)/i;
+
+export function createDetector({id,matches,collect,install}) {
+  if(typeof id!=='string' || !id.trim())throw TypeError('Detector id must be a non-empty string');
+  if(typeof matches!=='function')throw TypeError(`Detector "${id}" must define matches(url)`);
+  if(typeof collect!=='function')throw TypeError(`Detector "${id}" must define collect(doc)`);
+  const detector={
+    id:id.trim(),
+    matches(url=globalThis.location?.href || ''){
+      try{return Boolean(matches(url));}catch{return false;}
+    },
+    collect(doc=globalThis.document,url=globalThis.location?.href || '',context){
+      return collect(doc,url,context);
+    }
+  };
+  if(typeof install==='function')detector.install=install;
+  return Object.freeze(detector);
+}
+
+export function runDetectors(detectors=SITE_DETECTORS,{doc=globalThis.document,url=globalThis.location?.href || '',context,firstOnly=false}={}) {
+  const results=[];
+  for(const detector of detectors){
+    if(!detector?.matches?.(url))continue;
+    results.push({id:detector.id,detector,items:detector.collect(doc,url,context)});
+    if(firstOnly)break;
+  }
+  return results;
+}
 
 export function detectDocumentMedia(doc=document,baseUrl=location.href,timing=performance) {
   const found=new Map();
@@ -36,6 +63,23 @@ export function detectDocumentMedia(doc=document,baseUrl=location.href,timing=pe
   return {pageUrl:baseUrl,...getVideoMetadata(doc,baseUrl),videoInfos:[...found.values()].slice(-64)};
 }
 
+export const documentDetector=createDetector({
+  id:'document',
+  matches:url=>{try{return /^https?:$/.test(new URL(url).protocol);}catch{return false;}},
+  collect:(doc,url,context)=>detectDocumentMedia(doc,url,context?.timing)
+});
+
+export const SITE_DETECTORS=Object.freeze([
+  createDetector(xDetector),
+  createDetector(missavDetector)
+]);
+
+export const DETECTORS=Object.freeze([
+  ...SITE_DETECTORS,
+  createDetector(genericPlayerDetector),
+  documentDetector
+]);
+
 export function installMediaDetection() {
   let timer,last='',currentPage=location.href,siteDetection,genericPlayers;
   const snapshot=()=>siteDetection ? siteDetection.snapshot() : detectDocumentMedia();
@@ -50,8 +94,9 @@ export function installMediaDetection() {
     catch(error){notifyIfContextInvalid(error);}
   };
   const schedule=()=>{if(siteDetection){if(!timer)timer=setTimeout(report,150);}else{clearTimeout(timer);timer=setTimeout(report,250);}};
-  siteDetection=installXDetection(schedule) || installMissavDetection(schedule);
-  if(!siteDetection)genericPlayers=installGenericPlayerDetection();
+  const matchedSite=SITE_DETECTORS.find(detector=>detector.matches(currentPage));
+  siteDetection=matchedSite?.install?.(schedule) || null;
+  if(!siteDetection && genericPlayerDetector.matches(currentPage))genericPlayers=genericPlayerDetector.install();
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id && sender.id!==chrome.runtime.id)return false;
     if(message.command==='get_generic_video_info' && window.top===window){
