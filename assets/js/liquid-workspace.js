@@ -1,13 +1,22 @@
 // Navigation optics only. Download, selection and focus behavior stay in the workspace.
 export function createLiquidWorkspace() {
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-  let previous, observer, animation;
-  reducedMotion.addEventListener('change', () => animation?.cancel());
+  const reducedTransparency = matchMedia('(prefers-reduced-transparency: reduce)');
+  let previous, observer, animation, activeNav;
+  const clearOptics = () => {
+    if (reducedMotion.matches) animation?.cancel();
+    if (reducedMotion.matches || reducedTransparency.matches) {
+      activeNav?.style.removeProperty('--light-x');
+    }
+  };
+  reducedMotion.addEventListener?.('change', clearOptics);
+  reducedTransparency.addEventListener?.('change', clearOptics);
   return {
     bind() {
       observer?.disconnect();
       animation?.cancel();
       const nav = document.querySelector('.popup-tabs-bar');
+      activeNav = nav;
       if (!nav) return;
       const lens = document.createElement('span');
       lens.className = 'liquid-nav-lens';
@@ -32,11 +41,12 @@ export function createLiquidWorkspace() {
       observer = new ResizeObserver(() => position());
       observer.observe(nav);
       nav.addEventListener('pointermove', event => {
-        if (reducedMotion.matches || event.pointerType === 'touch') return;
+        if (reducedMotion.matches || reducedTransparency.matches || event.pointerType === 'touch') return;
         const rect = nav.getBoundingClientRect();
         nav.style.setProperty('--light-x', `${(event.clientX - rect.left) / rect.width * 100}%`);
       });
       nav.addEventListener('pointerleave', () => nav.style.removeProperty('--light-x'));
+      clearOptics();
     }
   };
 }

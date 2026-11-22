@@ -412,6 +412,9 @@ html, body {
 .task-card-modern.status-downloading {
   border-left: 3px solid var(--accent-cyan);
 }
+.task-card-modern.status-retrying {
+  border-left: 3px solid var(--accent-amber);
+}
 .task-card-modern.status-queued {
   border-left: 3px solid var(--text-dim);
 }
@@ -450,6 +453,11 @@ html, body {
 .task-status-pill.downloading {
   background: rgba(6, 182, 212, 0.2);
   color: var(--accent-cyan);
+}
+.task-status-pill.retrying {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--accent-amber);
+  text-transform: none;
 }
 .task-status-pill.queued {
   background: rgba(148, 163, 184, 0.15);
@@ -1065,3 +1073,10 @@ button.modern-switch { flex-shrink: 0; padding: 0; cursor: pointer; }
 }
 
 .x-video-heading{display:flex;flex-direction:column;gap:4px;padding:10px 0 6px;font-size:12px;font-weight:600;overflow-wrap:anywhere;border-top:1px solid var(--border-color,#334155)}
+button:focus-visible,.btn-icon-btn:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--border-focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .toast-item-modern { background: var(--bg-card); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}

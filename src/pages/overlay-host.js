@@ -32,7 +32,8 @@
     }
     if(event.data?.type==='mediaflow-overlay-ready'){
       const panelStyle=getComputedStyle(host);
-      if(panelStyle.backdropFilter==='none' && !matchMedia('(prefers-reduced-transparency: reduce)').matches){close();return;}
+      const allowOpaque=matchMedia('(prefers-reduced-transparency: reduce)').matches || matchMedia('(prefers-contrast: more)').matches;
+      if(panelStyle.backdropFilter==='none' && !allowOpaque){close();return;}
       host.style.visibility='visible';finish?.({success:true});finish=null;
     }
   });
@@ -52,7 +53,7 @@
       preferredSize=saved.mediaflowOverlaySize || preferredSize;applySize(preferredSize);
     }).catch(()=>{});
     const shadow=host.attachShadow({mode:'closed'});
-    const css=`:host{all:initial;border-radius:24px;overflow:hidden;background:rgba(172,175,182,.84);box-shadow:0 16px 60px #0006,0 0 0 1px #ffffff80;backdrop-filter:blur(28px) saturate(160%);-webkit-backdrop-filter:blur(28px) saturate(160%)} iframe{display:block;width:100%;height:100%;border:0;background:transparent} @media (prefers-color-scheme:dark){:host{background:rgba(23,24,29,.84)}} @media (prefers-reduced-transparency:reduce){:host{background:#f2f2f7;backdrop-filter:none;-webkit-backdrop-filter:none}} @media (prefers-reduced-transparency:reduce) and (prefers-color-scheme:dark){:host{background:#242426}}`;
+    const css=`:host{all:initial;border-radius:24px;overflow:hidden;background:rgba(172,175,182,.84);box-shadow:0 16px 60px #0006,0 0 0 1px #ffffff80;backdrop-filter:blur(28px) saturate(160%);-webkit-backdrop-filter:blur(28px) saturate(160%)} iframe{display:block;width:100%;height:100%;border:0;background:transparent} @media (prefers-color-scheme:dark){:host{background:rgba(23,24,29,.84)}} @media (prefers-reduced-transparency:reduce){:host{background:#f2f2f7;box-shadow:0 16px 60px #0004,0 0 0 1px #c7c7cc;backdrop-filter:none;-webkit-backdrop-filter:none}} @media (prefers-reduced-transparency:reduce) and (prefers-color-scheme:dark){:host{background:#242426;box-shadow:0 16px 60px #0008,0 0 0 1px #3a3a3c}} @media (prefers-contrast:more){:host{background:#f2f2f7;box-shadow:0 16px 60px #0005,0 0 0 2px #1c1c1e;backdrop-filter:none;-webkit-backdrop-filter:none}} @media (prefers-contrast:more) and (prefers-color-scheme:dark){:host{background:#171719;box-shadow:0 16px 60px #0008,0 0 0 2px #f5f5f7}} @media (prefers-reduced-motion:reduce){:host,iframe{transition:none!important;animation:none!important}}`;
     try {const sheet=new CSSStyleSheet();sheet.replaceSync(css);shadow.adoptedStyleSheets=[sheet];}
     catch {const style=document.createElement('style');style.textContent=css;shadow.append(style);}
     frame=document.createElement('iframe');frame.title='MediaFlow';
