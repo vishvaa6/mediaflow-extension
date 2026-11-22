@@ -35,7 +35,14 @@ async function run(value){
     if(!task.url){reporter.update({phase:'resolving',progress:0});if(!await resolveSource())return;}
     controller.signal.throwIfAborted();
     const hls=task.format==='m3u8';
-    const onProgress=data=>reporter.update({phase:'downloading',...data});
+    const onProgress=data=>{
+      if(data.retrying){
+        reporter.update({phase:'retrying',...data});
+        reporter.flush();
+      }else{
+        reporter.update({phase:'downloading',retrying:false,retryAt:undefined,retryAttempt:undefined,retryMax:undefined,retryError:undefined,...data});
+      }
+    };
     const onFailure=error=>{reporter.flush();if(!stopped)emit('error',{error:errorData(networkError(error))});};
     const saveFile=async output=>{
       controller.signal.throwIfAborted();
@@ -46,7 +53,7 @@ async function run(value){
     if(hls){
       if(task.outputFormat==='mp4')await import('../vendor/mux-mp4.min.js');
       controller.signal.throwIfAborted();
-      engine=new HlsDownloader({saveFile,headerBridge,resolveSource:renewal,maxConcurrent:4,resourceRetries:0,timeout:60000,
+      engine=new HlsDownloader({saveFile,headerBridge,resolveSource:renewal,maxConcurrent:4,timeout:60000,
         transmuxerFactory:task.outputFormat==='mp4'?()=>new globalThis.muxjs.Transmuxer({keepOriginalTimestamps:false,remux:true}):undefined,onProgress,onFailure});
       await engine.start(task.url,{fileName:task.fileName,headers:task.headers,quality:task.quality,opfsFileName:task.opfsCacheFileName,outputFormat:task.outputFormat || 'source',downloadSubdir:task.downloadSubdir});
     }else{

@@ -1,7 +1,7 @@
 import {parsePlaylist, chooseVariant, compatiblePlaylists, encryptionIV} from './hls-playlist.js';
 import {needsSourceRefresh,httpError,retain474OnMissingSource} from './source-refresh.js';
 import {exactRequestCondition} from './media-headers.js';
-import {fetchBytes} from './network.js';
+import {fetchBytes,transientError,withRetry} from './network.js';
 import {createMp4Remuxer,MP4_CONVERTER_VERSION} from './mp4-output.js';
 import {assertMediaResponse} from './media-response.js';
 
@@ -22,7 +22,7 @@ export class HlsDownloader {
   bytesReceived = 0;
   completed = new Set();
   activeRuleIds = new Set();
-  constructor({saveFile,fetcher = fetch,storage = navigator.storage,cryptoApi = globalThis.crypto,maxConcurrent = 4,timeout = 60000,retryInterval = 500,resourceRetries=2,headerBridge,transmuxerFactory,resolveSource,...callbacks} = {}) {
+  constructor({saveFile,fetcher = fetch,storage = navigator.storage,cryptoApi = globalThis.crypto,maxConcurrent = 4,timeout = 60000,retryInterval,resourceRetries,maxAttempts,headerBridge,transmuxerFactory,resolveSource,...callbacks} = {}) {
     this.saveFile = saveFile;
     this.fetcher = (url, options) => fetcher.call(globalThis,url,options);
     this.storage = storage;
@@ -31,6 +31,11 @@ export class HlsDownloader {
     this.timeout = timeout;
     this.retryInterval = retryInterval;
     this.resourceRetries=resourceRetries;
+    this.maxAttempts = maxAttempts !== undefined
+      ? Math.max(1,Math.floor(Number(maxAttempts) || 1))
+      : resourceRetries !== undefined
+        ? Math.max(1,Math.floor(Number(resourceRetries) || 0) + 1)
+        : 4;
     this.headerBridge=headerBridge;
     this.transmuxerFactory=transmuxerFactory;
     this.resolveSource = resolveSource;
@@ -98,7 +103,7 @@ export class HlsDownloader {
       const data = response.data;
       assertMediaResponse(data,{sniff:!range || range.start===0});
       this.check();
-      if (range && data.length !== range.length) throw Error('Incomplete HLS byte-range segment');
+      if (range && data.length !== range.length) throw Object.assign(Error('Incomplete HLS byte-range segment'),{code:'NETWORK'});
       return {data,url:response.url || url};
     } finally {
       if (ruleId) {
@@ -108,9 +113,25 @@ export class HlsDownloader {
       }
     }
   }
+  retryOptions(attempts = this.maxAttempts) {
+    return {
+      attempts,
+      signal:this.controller.signal,
+      baseDelay:this.retryInterval,
+      shouldRetry:error => transientError(error) && !needsSourceRefresh(error),
+      onRetry:(attempt,ms,error) => this.report({
+        phase:'retrying',
+        retrying:true,
+        retryAt:Date.now() + ms,
+        retryAttempt:attempt,
+        retryMax:attempts,
+        retryError:error.message
+      })
+    };
+  }
   async loadPlaylist(url) {
     for (let depth=0;depth<6;depth++) {
-      const response = await this.request(url);
+      const response = await withRetry(() => this.request(url),this.retryOptions());
       const parsed = parsePlaylist(new TextDecoder().decode(response.data),response.url);
       if (!parsed.variants) return {...parsed,playlistUrl:response.url};
       const chosen = chooseVariant(parsed.variants,this.options.quality);
@@ -173,7 +194,7 @@ export class HlsDownloader {
     const total = this.totalSegments || 0, done = this.completedSegments || 0;
     this.callbacks.onProgress?.({bytesReceived:this.bytesReceived,finishNum:done,targetSegment:total,errorNum:0,
       progress:total ? done/total*90 : 0,isFileDownloading:false,outputExtension:this.manifest?.outputExtension,
-      phase:this.remuxEnabled && !this.remuxError?'downloading-mp4':'downloading',...extra});
+      phase:this.remuxEnabled && !this.remuxError?'downloading-mp4':'downloading',retrying:false,...extra});
   }
   async refreshUrls(generation) {
     if (generation !== this.urlGeneration) return;
@@ -216,48 +237,52 @@ export class HlsDownloader {
     return this.keyPromises.get(key.cacheName);
   }
   async downloadUnit(index) {
-    let renewed=false;
-    for (let attempt=0;attempt<=this.resourceRetries;attempt++) {
-      this.check();
-      const generation = this.urlGeneration;
-      try {
-        const unit = this.manifest.units[index];
-        // Fetch a new AES key while the first encrypted segment is in flight.
-        // keyFor shares the same promise across concurrent segments.
-        const [response,key] = await Promise.all([this.request(unit.url,unit.range),unit.key ? this.keyFor(unit.key) : null]);
-        let data = response.data;
-        if (unit.key) {
-          try { data = new Uint8Array(await this.cryptoApi.subtle.decrypt({name:'AES-CBC',iv:encryptionIV(unit.key.iv,unit.sequence)},key,data)); }
-          catch (error) {
-            if (error.name === 'OperationError') {
-              this.keyPromises.delete(unit.key.cacheName);
-              await this.root.removeEntry(unit.key.cacheName).catch(() => {});
-            }
-            throw error;
-          }
-        }
-        if (!data.length) throw Error('Empty HLS segment');
+    let renewed=false,refreshFailed=false;
+    await withRetry(async () => {
+      while (true) {
         this.check();
-        await this.writeFile(unit.cacheName,data);
-        // Closing the segment, rather than a popup storage update, is the commit.
-        this.completed.add(index);
-        if(!unit.isMap)this.completedSegments++;
-        this.bytesReceived += data.length;
-        this.queueRemux();
-        this.report();
-        return;
-      } catch (error) {
-        if (this.stopped()) throw error;
-        // Link renewal has its own single attempt; transient retries are owned
-        // by the queue and may be disabled here without disabling renewal.
-        if(needsSourceRefresh(error)){
-          if(renewed)throw Object.assign(Error('The media link was rejected after refresh. Cached segments were kept; open the original video page and retry.'),{status:error.status,code:'HTTP'});
-          renewed=true;try{await this.refreshUrls(generation);}catch(refreshError){throw retain474OnMissingSource(error,refreshError);}attempt--;continue;
+        const generation = this.urlGeneration;
+        try {
+          const unit = this.manifest.units[index];
+          // Fetch a new AES key while the first encrypted segment is in flight.
+          // keyFor shares the same promise across concurrent segments.
+          const [response,key] = await Promise.all([this.request(unit.url,unit.range),unit.key ? this.keyFor(unit.key) : null]);
+          let data = response.data;
+          if (unit.key) {
+            try { data = new Uint8Array(await this.cryptoApi.subtle.decrypt({name:'AES-CBC',iv:encryptionIV(unit.key.iv,unit.sequence)},key,data)); }
+            catch (error) {
+              if (error.name === 'OperationError') {
+                this.keyPromises.delete(unit.key.cacheName);
+                await this.root.removeEntry(unit.key.cacheName).catch(() => {});
+              }
+              throw error;
+            }
+          }
+          if (!data.length) throw Object.assign(Error('Empty HLS segment'),{code:'NETWORK'});
+          this.check();
+          await this.writeFile(unit.cacheName,data);
+          // Closing the segment, rather than a popup storage update, is the commit.
+          this.completed.add(index);
+          if(!unit.isMap)this.completedSegments++;
+          this.bytesReceived += data.length;
+          this.queueRemux();
+          this.report();
+          return;
+        } catch (error) {
+          if (this.stopped()) throw error;
+          // Link renewal has its own single attempt; transient retries use
+          // exponential backoff and Retry-After via withRetry.
+          if(needsSourceRefresh(error)){
+            if(renewed)throw Object.assign(Error('The media link was rejected after refresh. Cached segments were kept; open the original video page and retry.'),{status:error.status,code:'HTTP',needsSourceRefresh:true});
+            renewed=true;try{await this.refreshUrls(generation);}catch(refreshError){refreshFailed=true;throw retain474OnMissingSource(error,refreshError);}continue;
+          }
+          throw error;
         }
-        if(attempt===this.resourceRetries)throw error;
-        await new Promise(resolve => { const timer=setTimeout(done,this.retryInterval); const signal=this.controller.signal; function done(){clearTimeout(timer);signal.removeEventListener('abort',done);resolve();} signal.addEventListener('abort',done,{once:true}); });
       }
-    }
+    },{
+      ...this.retryOptions(),
+      shouldRetry:error => !refreshFailed && transientError(error) && !needsSourceRefresh(error)
+    });
   }
   async prepareRemux() {
     if(this.options.outputFormat==='mp4' && (this.manifest.outputExtension==='mp4' || this.manifest.outputExtension==='ts' && this.transmuxerFactory)){
