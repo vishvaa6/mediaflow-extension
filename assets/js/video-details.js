@@ -1,12 +1,36 @@
-import {xPost} from './x-media.js';
-import {missavVideoPage} from './missav-media.js';
-import {is91PornWatchPage} from './porn91-media.js';
+import {xPost,isXPage} from './x-media.js';
+import {missavVideoPage,isMissavPage} from './missav-media.js';
+import {is91PornWatchPage,is91PornPage} from './porn91-media.js';
+import {
+  normalizeSiteHost,
+  isSupportedPlayerHost,
+  isListingOrNonWatchPath,
+  isRecognizedSiteWatchPage,
+  stripLocalePathPrefix
+} from './top-sites-registry.js';
+
+const CANONICAL_KEY_HOST = {
+  'pornhub.com': 'pornhub',
+  'xvideos.com': 'xvideos',
+  'xnxx.com': 'xnxx',
+  'xhamster.com': 'xhamster'
+};
+const KVS_VIDEO_PATH_HOST = new Set([
+  'txxx.com', 'anyporn.com', 'anysex.com', 'fpo.xxx', 'ok.xxx', 'ozeex.com',
+  'porntrex.com', 'vipwank.com', 'xgroovy.com', 'youramateurporn.com', 'zbporn.com',
+  'usersporn.com', 'viviporn.tv', '4tube.com', 'bigporn.com', 'justporn.com',
+  'largehdtube.com', 'letsporn.com', 'porndroids.com', 'pornid.xxx', 'porzo.com',
+  'qorno.com', 'sexvid.xxx', 'stocking-tease.com', 'porndoe.com'
+]);
 
 export function recognizedVideoPage(value){
   try{
     const url=new URL(value);
     if(!/^https?:$/.test(url.protocol))return false;
-    return is91PornWatchPage(value) || !!missavVideoPage(value) || !!xPost(value) || /view_video\.php/.test(url.pathname) && url.searchParams.has('viewkey') || /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(?:video[.\d]|videos?\/|v\/)/i.test(url.pathname) || /^(?:www\.)?redtube\.com$/i.test(url.hostname) && /^\/\d+\/?$/.test(url.pathname);
+    if(is91PornWatchPage(value) || !!missavVideoPage(value) || !!xPost(value) || isRecognizedSiteWatchPage(value))return true;
+    if(is91PornPage(value) || isMissavPage(value) || isXPage(value) || isSupportedPlayerHost(url.hostname))return false;
+    if(isListingOrNonWatchPath(url.pathname))return false;
+    return /view_video\.php/.test(url.pathname) && url.searchParams.has('viewkey') || /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(?:video[.\d]|videos?\/|v\/)/i.test(url.pathname);
   }catch{return false;}
 }
 
@@ -16,17 +40,59 @@ export function videoKey(value) {
     if (!/^https?:$/.test(url.protocol)) return '';
     const post=xPost(value);
     if(post)return `x:${post.id}:video:${post.index}`;
-    let host = url.hostname.toLowerCase().replace(/^www\./,'');
     const missav=missavVideoPage(value);
     if(missav)return 'missav:'+new URL(missav).pathname.split('/').pop().toLowerCase();
-    if(/^(?:[^.]+\.)?pornhub\.(?:com|org)$|^pornhubpremium\.com$/.test(host))host='pornhub';
-    if(/^(?:xvideos\.com|xvv1deos\.com|xnxx\.(?:com|es))$/.test(host))host=host.startsWith('xnxx')?'xnxx':'xvideos';
-    if(/^xhamster(?:\d+)?\.(?:com|desi)$/.test(host))host='xhamster';
+    const normalizedHost = normalizeSiteHost(url.hostname);
+    const host = CANONICAL_KEY_HOST[normalizedHost] || normalizedHost;
     const viewkey = url.searchParams.get('viewkey');
     if (viewkey) return `${host}:viewkey:${viewkey}`;
-    const xv = url.pathname.match(/^\/(?:video\.([a-z0-9_-]+)|video(\d+))(?:\/|$)/i);
+    const pathNoLocale = stripLocalePathPrefix(url.pathname);
+    const xv = pathNoLocale.match(/^\/(?:video\.([a-z0-9_-]+)|video(\d+))(?:\/|$)/i) ||
+      (host === 'xnxx' ? pathNoLocale.match(/^\/video-([a-z0-9_-]+)(?:\/|$)/i) : null);
     if (xv) return `${host}:video:${xv[1] || xv[2]}`;
-    const path = url.pathname.replace(/\/+$/,'') || '/';
+    if (host === 'redtube.com') {
+      const rt = pathNoLocale.match(/^\/(\d+)\/?$/);
+      if (rt) return `${host}/${rt[1]}`;
+    }
+    if (host === 'youporn.com') {
+      const yp = pathNoLocale.match(/^\/watch\/(\d+)(?:\/|$)/i);
+      if (yp) return `${host}:video:${yp[1]}`;
+    }
+    if (host === 'tube8.com' && !isListingOrNonWatchPath(url.pathname)) {
+      const t8 = pathNoLocale.match(/^\/(?:[^/]+\/[^/]+|porn-video)\/(\d+)(?:\/|$)/i) ||
+        pathNoLocale.match(/^\/watch\/([a-z0-9_-]+)(?:\/|$)/i);
+      if (t8) return `${host}:video:${t8[1]}`;
+    }
+    if (host === 'thumbzilla.com') {
+      const tz = pathNoLocale.match(/^\/video\/([a-z0-9_-]+)(?:\/|$)/i);
+      if (tz) return `${host}:video:${tz[1]}`;
+    }
+    if (host === 'spankbang.com') {
+      const sb = pathNoLocale.match(/^\/([a-z0-9]+)\/video(?:\/|$)/i) ||
+        pathNoLocale.match(/^\/video\/([a-z0-9_-]+)(?:\/|$)/i);
+      if (sb) return `${host}:video:${sb[1].toLowerCase()}`;
+    }
+    if (host === 'eporner.com') {
+      const ep = pathNoLocale.match(/^\/(?:video-|hd-porn\/)([a-z0-9_-]+)(?:\/|$)/i);
+      if (ep) return `${host}:video:${ep[1]}`;
+    }
+    if (host === 'beeg.com') {
+      const bg = pathNoLocale.match(/^\/(?:-?(\d{6,})|video\/([a-z0-9_-]+))\/?$/i);
+      if (bg) return `${host}:video:${bg[1] || bg[2]}`;
+    }
+    if (host === 'tnaflix.com') {
+      const tn = pathNoLocale.match(/\/video(\d+)(?:\/|$)/i);
+      if (tn) return `${host}:video:${tn[1]}`;
+    }
+    if (host === 'youjizz.com') {
+      const yj = pathNoLocale.match(/^\/videos\/(?:.*?-)?(\d+)\.html$/i);
+      if (yj) return `${host}:video:${yj[1]}`;
+    }
+    if (KVS_VIDEO_PATH_HOST.has(host) || (isSupportedPlayerHost(normalizedHost) && /^\/videos\/\d+(?:\/|$)/i.test(pathNoLocale))) {
+      const kvs = pathNoLocale.match(/^\/videos?\/(\d+)(?:\/|$)/i);
+      if (kvs) return `${host}:video:${kvs[1]}`;
+    }
+    const path = (host === 'xhamster' ? pathNoLocale : url.pathname).replace(/\/+$/,'') || '/';
     const queryKeys = host==='huangguoai.com' ? ['v','id','video_id','ep'] : ['v','id','video_id'];
     const identity = queryKeys.map(key => url.searchParams.has(key) ? `${key}=${url.searchParams.get(key)}` : '').filter(Boolean).join('&');
     return `${host}${path}${identity ? '?'+identity : ''}`;
