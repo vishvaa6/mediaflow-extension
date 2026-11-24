@@ -25,8 +25,8 @@ export function urlHeightHint(url) {
 }
 
 export function mediaFormat(url, type = '') {
-  if (/m3u8|mpegurl|^hls$/i.test(type) || /\.m3u8(?:[?#]|$)/i.test(url)) return 'm3u8';
-  if (/webm/i.test(type) || /\.webm(?:[?#]|$)/i.test(url)) return 'webm';
+  if (/m3u8|mpegurl|^hls$/i.test(type) || /\.m3u8\/?(?:[?#]|$)/i.test(url)) return 'm3u8';
+  if (/webm/i.test(type) || /\.webm\/?(?:[?#]|$)/i.test(url)) return 'webm';
   return 'mp4';
 }
 
@@ -271,7 +271,7 @@ export function decodeKvsUrl(videoUrl, licenseCode) {
 }
 
 function isPreviewOrNonVideo(url) {
-  return /(?:_preview\.mp4|_preview\.webm|\/preview(?:s|_|\/|-)|\/thumbs?\/|sprite)/i.test(url) ||
+  return /(?:_preview\.(?:mp4|webm|m3u8)|\/preview(?:s|_|\/|-)|\/thumbs?\/|sprite)/i.test(url) ||
     /^(?:blob:|data:|javascript:)/i.test(url);
 }
 

@@ -50,7 +50,7 @@ export function extractMedia(html) {
   const definitions=[];
   const add=(url,quality=0,type='',extra={})=>{
     url=decodeMediaText(url).trim();
-    if(!url || /^(?:blob:|data:|javascript:)/i.test(url))return;
+    if(!url || /^(?:blob:|data:|javascript:|function\/0\/)/i.test(url))return;
     if(url.startsWith('//'))url='https:'+url;
     const format=mediaFormat(url,type);
     const height=mediaHeight(quality);
@@ -67,7 +67,7 @@ export function extractMedia(html) {
     const rawFormat=String(def.format || def.type || 'mp4');
     if(!/^(?:mp4|webm|hls|m3u8)$/i.test(rawFormat))return;
     const decodedUrl=decodeMediaText(def.videoUrl).trim();
-    const hasDirectExt=/\.(?:mp4|webm|m3u8)(?:[?#]|$)/i.test(decodedUrl);
+    const hasDirectExt=/\.(?:mp4|webm|m3u8)\/?(?:[?#]|$)/i.test(decodedUrl);
     add(decodedUrl,def.quality || def.label || def.height || fallbackQuality,rawFormat,{isMetadata:!hasDirectExt});
   };
   const addEncodingsArray=(items,fallbackQuality=0)=>{
@@ -77,7 +77,8 @@ export function extractMedia(html) {
       const rawUrl=item.filename || item.src || item.url || item.file || item.videoUrl;
       if(typeof rawUrl!=='string')continue;
       const q=item.quality || item.label || item.height || item.res || item.name || fallbackQuality || 0;
-      add(rawUrl,q,item.type || item.format || '');
+      const hint=item.type || item.format || (/hls|m3u8/i.test(String(item.name || item.quality || '')) ? 'm3u8' : '');
+      add(rawUrl,q,hint);
     }
   };
   const flashvars=jsonAssignment(html,/(?:var|let|const)\s+flashvars_\d+\s*=\s*/);
@@ -113,15 +114,18 @@ export function extractMedia(html) {
     add(url,quality,tagAttribute(tag,'type'));
   }
   let visited=0;
-  const visit=(object,quality=0,depth=0)=>{
+  const visit=(object,quality=0,depth=0,formatHint='')=>{
     if(!object || typeof object!=='object' || depth>12 || ++visited>10000)return;
-    if(Array.isArray(object)){object.forEach(item=>visit(item,quality,depth+1));return;}
+    if(Array.isArray(object)){object.forEach(item=>visit(item,quality,depth+1,formatHint));return;}
     const q=object.quality || object.label || object.height || object.res || object.size || quality;
     if(object.videoUrl && /^(?:mp4|webm|hls|m3u8)$/i.test(String(object.format || '')))addMindGeekDef(object,q);
     for(const [key,value]of Object.entries(object)){
       if((key==='dataEncodings' || key==='encodings') && Array.isArray(value)){addEncodingsArray(value,q);continue;}
-      if(typeof value==='string' && /^(?:file|src|url|video_?url|contentUrl|hls|m3u8|stream|chromecastSource|filename)$/i.test(key) && /\.(?:m3u8|mp4|webm)(?:[?#]|$)/i.test(decodeMediaText(value)))add(value,q,object.type || object.format);
-      else if(value && typeof value==='object')visit(value,mediaHeight(key) || q,depth+1);
+      const nextFormat=/^(?:hls|m3u8)$/i.test(key) ? 'm3u8' : formatHint;
+      if(typeof value==='string' && /^(?:file|src|url|video_?url|contentUrl|hls|m3u8|stream|chromecastSource|filename|manifest)$/i.test(key)){
+        const decoded=decodeMediaText(value);
+        if(/\.(?:m3u8|mp4|webm)\/?(?:[?#]|$)/i.test(decoded) || (nextFormat==='m3u8' && /^(?:https?:)?\/\//i.test(decoded)))add(value,q,object.type || object.format || nextFormat);
+      }else if(value && typeof value==='object')visit(value,mediaHeight(key) || q,depth+1,nextFormat);
     }
   };
   for(const match of html.matchAll(/<script\b[^>]*type=["']application\/(?:ld\+)?json["'][^>]*>([\s\S]*?)<\/script>/gi))try{visit(JSON.parse(match[1]));}catch{}
@@ -134,7 +138,7 @@ export function extractMedia(html) {
     for(const [key,value]of Object.entries(node)){
       if(/^(?:file|src|url|video_?url|hls|m3u8)$/i.test(key) && typeof value==='string'){
         const decoded=decodeMediaText(value).trim();
-        if(/\.(?:m3u8|mp4|webm)(?:[?#]|$)/i.test(decoded) || /video\/|mpegurl|m3u8|^hls$/i.test(typeHint))add(decoded,q,typeHint || (/hls|m3u8/i.test(key)?'m3u8':''));
+        if(/\.(?:m3u8|mp4|webm)\/?(?:[?#]|$)/i.test(decoded) || /video\/|mpegurl|m3u8|^hls$/i.test(typeHint))add(decoded,q,typeHint || (/hls|m3u8/i.test(key)?'m3u8':''));
       }else if(value && typeof value==='object' && !/poster|thumb|preview|ad|vast|track|sprite/i.test(key)){
         visitConfig(value,mediaHeight(key) || q,depth+1);
       }
@@ -147,7 +151,7 @@ export function extractMedia(html) {
   }
   // Quoted media fields in JW Player, Video.js and similar configurations.
   for(const match of html.matchAll(/(?:["'](?:file|src|contentUrl|video_?url|hls|m3u8)["']|\b(?:file|src|hls|m3u8))\s*[:=]\s*(["'])((?:\\.|(?!\1)[^\\\r\n])*?)\1/gi)){
-    const url=decodeMediaText(match[2]);if(/\.(?:m3u8|mp4|webm)(?:[?#]|$)/i.test(url))add(url);
+    const url=decodeMediaText(match[2]);if(/\.(?:m3u8|mp4|webm)\/?(?:[?#]|$)/i.test(url))add(url);
   }
   const kvsTitle=extractKvsFlashvars(html)?.video_title;
   const title=decodeMediaText(flashvars?.video_title || kvsTitle || html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || '');

@@ -15,8 +15,8 @@ function playlistVariants(text, baseUrl) {
 }
 const height = definition => mediaHeight(definition.quality);
 function normalizeResolvedFormat(rawFormat, resolvedUrl) {
-  if (/m3u8|mpegurl|^hls$/i.test(rawFormat || '') || /\.m3u8(?:[?#]|$)/i.test(resolvedUrl)) return 'm3u8';
-  if (/webm/i.test(rawFormat || '') || /\.webm(?:[?#]|$)/i.test(resolvedUrl)) return 'webm';
+  if (/m3u8|mpegurl|^hls$/i.test(rawFormat || '') || /\.m3u8\/?(?:[?#]|$)/i.test(resolvedUrl)) return 'm3u8';
+  if (/webm/i.test(rawFormat || '') || /\.webm\/?(?:[?#]|$)/i.test(resolvedUrl)) return 'webm';
   return rawFormat && /^(?:mp4|webm|m3u8)$/i.test(rawFormat) ? rawFormat.toLowerCase() : 'mp4';
 }
 function collectMetadataItems(node, parentFormat, parentQuality = 0, depth = 0, visited = new Set()) {

@@ -14,9 +14,9 @@ const SEGMENT_EXT_RE = /\.(?:ts|m4s|cmfv|cmfa)$/i;
 const NON_MEDIA_EXT_RE = /\.(?:html?|json|mjs|cjs|js|css|vtt|srt|ass|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|eot|mpd|mp3|m4a|aac|ogg|wav|xml)$/i;
 const SEGMENT_PATH_RE = /\/(?:seg|chunk|frag)-/i;
 const PREVIEW_PATH_RE = /\/preview|_preview|-preview|\/thumbs\/|\/thumb_vids\/|sprite|teaser/i;
-const M3U8_EXT_RE = /\.m3u8(?:[?#]|$)/i;
-const MP4_EXT_RE = /\.mp4(?:[?#]|$)/i;
-const WEBM_EXT_RE = /\.webm(?:[?#]|$)/i;
+const M3U8_EXT_RE = /\.m3u8\/?(?:[?#]|$)/i;
+const MP4_EXT_RE = /\.mp4\/?(?:[?#]|$)/i;
+const WEBM_EXT_RE = /\.webm\/?(?:[?#]|$)/i;
 const HLS_PATH_RE = /\/hls\/.*(?:playlist|manifest)/i;
 const STANDARD_HEIGHTS = new Set([2160, 1440, 1080, 720, 540, 480, 360, 240, 144]);
 

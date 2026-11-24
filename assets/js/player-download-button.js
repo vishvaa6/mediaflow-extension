@@ -58,16 +58,28 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
     setStyle(record.menu,'transform-origin',openBelow?'top right':'bottom right');
     setStyle(record.menu,'--mf-menu-offset',openBelow?'-6px':'6px');
   }
-  function loadPlaylists(videos){
+  function expandedMasterUrls(videos){
+    const covered=new Set();
     for(const video of videos){
-      if(!expandPlaylist || video.format!=='m3u8')continue;
+      const entry=playlists.get(video.videoUrl);
+      if(!entry?.choices?.length)continue;
+      if(entry.choices.some(choice=>choice.videoUrl!==video.videoUrl)){
+        for(const choice of entry.choices)covered.add(choice.videoUrl);
+      }
+    }
+    return covered;
+  }
+  function loadPlaylists(videos){
+    const covered=expandedMasterUrls(videos);
+    for(const video of videos){
+      if(!expandPlaylist || video.format!=='m3u8' || covered.has(video.videoUrl))continue;
       const cached=playlists.get(video.videoUrl);
       if(cached && (!cached.retryAfter || cached.retryAfter>Date.now()))continue;
       const result={pending:true};
       playlists.set(video.videoUrl,result);
       while(playlists.size>64)playlists.delete(playlists.keys().next().value);
       expandPlaylist(video).then(choices=>{
-        result.choices=choices.map(({videoUrl,quality})=>({videoUrl,quality}));
+        result.choices=choices.map(({videoUrl,quality,headers})=>({videoUrl,quality,...(headers?{headers}:{})}));
       },()=>{result.retryAfter=Date.now()+30000;}).finally(()=>{
         result.pending=false;
         sync(latest);
@@ -75,9 +87,13 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
     }
   }
   function choicesFor(videos){
+    const covered=expandedMasterUrls(videos);
     const unique=new Map();
     for(const video of videos){
-      const sources=playlists.get(video.videoUrl)?.choices?.map(choice=>({...video,...choice})) || [video];
+      const cached=playlists.get(video.videoUrl)?.choices;
+      const isMaster=Boolean(cached?.some(choice=>choice.videoUrl!==video.videoUrl));
+      if(!isMaster && covered.has(video.videoUrl))continue;
+      const sources=cached?.map(choice=>({...video,...choice})) || [video];
       for(const source of sources){
         const key=qualityKey(source);
         if(!unique.has(key))unique.set(key,source);
@@ -307,11 +323,12 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
       record.entry=entry;
       const sources=validVariants(variants(entry)),open=record.menu.matches(':popover-open');
       if(open){loadPlaylists(sources);positionMenu(record);}
+      const covered=expandedMasterUrls(sources);
       const videos=choicesFor(sources),mediaId=identity(entry,sources[0]);
       if(record.mediaId!==mediaId){record.mediaId=mediaId;record.selectedUrl='';record.selectedQuality=selections.get(mediaId) || '';}
       const video=selectedVideo(record,videos),id=identity(entry,video);
-      updateChoices(record,videos.filter(choice=>!playlists.get(choice.videoUrl)?.pending),video);
-      const checking=sources.some(source=>playlists.get(source.videoUrl)?.pending);
+      updateChoices(record,videos.filter(choice=>covered.has(choice.videoUrl) || !playlists.get(choice.videoUrl)?.pending),video);
+      const checking=sources.some(source=>!covered.has(source.videoUrl) && playlists.get(source.videoUrl)?.pending);
       const note=checking?'Checking HLS qualities…':record.loadingEntry?'Detecting video…':videos.length?'':unavailable(entry) || 'No downloadable qualities found.';
       if(record.note.textContent!==note)record.note.textContent=note;
       if(record.note.hidden!==!note)record.note.hidden=!note;
