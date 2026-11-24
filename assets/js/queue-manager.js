@@ -5,6 +5,7 @@ import {HlsDownloader as PersistentHlsDownloader} from './hls-downloader.js';
 import {downloadedRecord} from './video-details.js';
 import {mediaHeaders} from './media-headers.js';
 import {createMediaDiscovery} from './media-discovery.js';
+import {installNetworkStreamObserver} from './network-stream-observer.js';
 import {isXPage} from './x-media.js';
 import {OffscreenDownload} from './offscreen-client.js';
 import {networkError, transientError, retryDelay, restoreError} from './network.js';
@@ -40,6 +41,7 @@ export function installQueueManager({queueStorage, historyStorage, settingsStora
   const taskById = async id => (await queueStorage.get()).tasks.find(t => t.id === id);
   const patch = (id, value) => queueStorage.updateTask(id, value);
   const notify = message => chrome.runtime.sendMessage(message).catch(() => {});
+  installNetworkStreamObserver({discovery, notify});
   const {fetchResource, fetchText} = createResourceFetcher({useOffscreen, ensureOffscreen: offscreen.ensureOffscreen, headerRules, notify});
 
   const serial = (id, fn) => {

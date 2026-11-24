@@ -153,11 +153,14 @@ export function buildQueueRoutes({
         return {success: true};
       }
     },
-    'media-detection-snapshot': async message => {
-      const tab = chrome.tabs?.get ? await chrome.tabs.get(message.tabId) : null;
-      const pageUrl = tab?.url || message.pageUrl;
+    'media-detection-snapshot': async (message, sender) => {
+      const tabId = message.tabId ?? sender?.tab?.id;
+      const tab = Number.isInteger(tabId) && chrome.tabs?.get
+        ? await Promise.resolve().then(() => chrome.tabs.get(tabId)).catch(() => null)
+        : null;
+      const pageUrl = tab?.url || message.pageUrl || sender?.tab?.url || '';
       return {
-        videoInfos: discovery.snapshot(message.tabId, pageUrl),
+        videoInfos: Number.isInteger(tabId) ? discovery.snapshot(tabId, pageUrl) : [],
         pageUrl,
         ...(isXPage(pageUrl) ? {site: 'x'} : isMissavPage(pageUrl) ? {site: 'missav'} : {})
       };
