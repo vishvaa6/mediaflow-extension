@@ -140,8 +140,11 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
     }
   }
   document.addEventListener('mediaflow:context-invalidated',showReconnect);
+  const isInteracting=record=>Boolean(record?.pill?.matches?.(':hover,:focus-within') || record?.menu?.matches?.(':popover-open'));
   function removeControl(player,record){
-    clearTimeout(record.messageTimer);record.glintMotion?.forEach(animation=>animation.cancel());
+    clearTimeout(record.messageTimer);clearTimeout(record.removeTimer);record.removeTimer=0;
+    if(record.glintFrame){cancelAnimationFrame(record.glintFrame);record.glintFrame=0;}
+    record.glintMotion?.forEach(animation=>animation.cancel());
     record.pill.remove();record.message.remove();controls.delete(player);
     if(record.positioned && ![...controls.values()].some(other=>other.host===record.host))record.host.classList.remove('mediaflow-download-host');
   }
@@ -168,6 +171,7 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
       if(!host)continue;
       const fixed=host.matches('body,html');
       present.add(player);let record=controls.get(player);
+      if(record?.removeTimer){clearTimeout(record.removeTimer);record.removeTimer=0;}
       if(record && record.host!==host){removeControl(player,record);record=null;}
       if(!record){
         const claimed=new Set([...controls.values()].flatMap(control=>[control.pill,control.message]));
@@ -198,27 +202,37 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
         const positioned=!fixed && (host.classList.contains('mediaflow-download-host') || getComputedStyle(host).position==='static');
         if(positioned)host.classList.add('mediaflow-download-host');
         host.append(message);
-        record={pill,button,trigger,label,menu,options,note,message,host,positioned,entry,mediaId:'',selectedUrl:'',selectedQuality:'',optionSignature:''};
+        record={pill,button,trigger,label,menu,options,note,message,host,positioned,entry,mediaId:'',selectedUrl:'',selectedQuality:'',optionSignature:'',removeTimer:0,glintFrame:0,expandingUntil:0,lastPos:null,pendingLeaveSync:false};
         controls.set(player,record);
-        const retryDock=()=>{
-          if(record.entry.toolbarAnchor && !record.toolbarAnchor)requestAnimationFrame(()=>sync(latest));
+        const onInteractionEnd=()=>{
+          if(record.pendingLeaveSync || record.removeTimer || record.entry.toolbarAnchor && !record.toolbarAnchor){
+            record.pendingLeaveSync=false;
+            requestAnimationFrame(()=>sync(latest));
+          }
         };
-        pill.addEventListener('pointerleave',retryDock);
-        pill.addEventListener('focusout',retryDock);
+        pill.addEventListener('pointerenter',()=>{record.expandingUntil=performance.now()+260;},{passive:true});
+        pill.addEventListener('pointerleave',onInteractionEnd);
+        pill.addEventListener('focusout',onInteractionEnd);
         pill.addEventListener('pointermove',event=>{
-          if(reducedMotion.matches || event.pointerType==='touch' || menu.contains(event.target))return;
-          if(!record.glintMotion){
-            // Move the light inside the fixed rim mask without changing the page DOM.
-            record.glintMotion=['backgroundPositionX','backgroundPositionY'].map(property=>{
-              const animation=glint.animate([{[property]:'100%'},{[property]:'0%'}],{duration:1000,fill:'both'});
-              animation.pause();return animation;
-            });
-          }
-          const rect=pill.getBoundingClientRect();
-          if(rect.width && rect.height){
-            const position=[(event.clientX-rect.left)/rect.width,(event.clientY-rect.top)/rect.height];
-            record.glintMotion.forEach((animation,index)=>{animation.currentTime=1000*Math.max(0,Math.min(1,position[index]));});
-          }
+          if(reducedMotion.matches || event.pointerType==='touch' || menu.contains(event.target) || performance.now()<record.expandingUntil)return;
+          const clientX=event.clientX,clientY=event.clientY;
+          if(record.glintFrame)return;
+          record.glintFrame=requestAnimationFrame(()=>{
+            record.glintFrame=0;
+            if(!pill.isConnected || reducedMotion.matches)return;
+            if(!record.glintMotion){
+              // Move the light inside the fixed rim mask without changing the page DOM.
+              record.glintMotion=['backgroundPositionX','backgroundPositionY'].map(property=>{
+                const animation=glint.animate([{[property]:'100%'},{[property]:'0%'}],{duration:1000,fill:'both'});
+                animation.pause();return animation;
+              });
+            }
+            const rect=pill.getBoundingClientRect();
+            if(rect.width && rect.height){
+              const position=[(clientX-rect.left)/rect.width,(clientY-rect.top)/rect.height];
+              record.glintMotion.forEach((animation,index)=>{animation.currentTime=1000*Math.max(0,Math.min(1,position[index]));});
+            }
+          });
         },{passive:true});
         for(const name of ['pointerdown','mousedown','touchstart'])button.addEventListener(name,event=>event.stopPropagation());
         for(const node of [trigger,menu])for(const name of ['pointerdown','mousedown','touchstart','click','keydown','keyup'])node.addEventListener(name,event=>event.stopPropagation());
@@ -267,13 +281,25 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
         const rect=player.getBoundingClientRect(),parent=host.getBoundingClientRect();
         const top=Math.round(fixed?rect.top:rect.top-parent.top-host.clientTop+host.scrollTop);
         const right=Math.round(fixed?document.documentElement.clientWidth-rect.right:parent.left+host.clientLeft+host.clientWidth-rect.right-host.scrollLeft);
-        if(fixed)setStyle(record.message,'position','fixed');
-        if(!anchor){
-          if(fixed)setStyle(record.pill,'position','fixed');
-          setStyle(record.pill,'--mf-player-width',`${Math.max(0,Math.round(rect.width)-20)}px`);
-          setStyle(record.pill,'top',`${top+10}px`);setStyle(record.pill,'right',`${right+10}px`);
+        const playerWidth=Math.max(0,Math.round(rect.width)-20);
+        const minorHoverShift=Boolean(
+          isInteracting(record) && record.lastPos &&
+          Math.abs(top-record.lastPos.top)<=6 &&
+          Math.abs(right-record.lastPos.right)<=6 &&
+          Math.abs(playerWidth-record.lastPos.width)<=12
+        );
+        if(minorHoverShift){
+          record.pendingLeaveSync=true;
+        }else{
+          record.lastPos={top,right,width:playerWidth};
+          if(fixed)setStyle(record.message,'position','fixed');
+          if(!anchor){
+            if(fixed)setStyle(record.pill,'position','fixed');
+            setStyle(record.pill,'--mf-player-width',`${playerWidth}px`);
+            setStyle(record.pill,'top',`${top+10}px`);setStyle(record.pill,'right',`${right+10}px`);
+          }
+          setStyle(record.message,'top',`${top+48}px`);setStyle(record.message,'right',`${right+10}px`);
         }
-        setStyle(record.message,'top',`${top+48}px`);setStyle(record.message,'right',`${right+10}px`);
       }
       if(!samePlayer(record.entry,entry)){
         record.menu.hidePopover();setMessage(record,'');record.mediaId='';record.selectedUrl='';record.selectedQuality='';
@@ -300,6 +326,18 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
       record.button.setAttribute('aria-label',label);
     }
     for(const [player,record] of controls)if(!present.has(player)){
+      if(isInteracting(record) && record.host?.isConnected){
+        record.pendingLeaveSync=true;
+        if(!record.removeTimer){
+          record.removeTimer=setTimeout(()=>{
+            record.removeTimer=0;
+            if(controls.get(player)===record && !latest.some(entry=>entry.element===player) && !isInteracting(record)){
+              removeControl(player,record);
+            }
+          },250);
+        }
+        continue;
+      }
       removeControl(player,record);
     }
   }

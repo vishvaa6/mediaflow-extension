@@ -9,18 +9,20 @@
 .mediaflow-download-pill{
   --mf-glass-tint:#24242638;--mf-glass-blur:4px;--mf-glass-brightness:.60;
   --mf-spring:linear(0,.29 11%,.73 25%,.99 40%,1.045 54%,1.018 71%,.998 87%,1);
+  --mf-expand-ease:cubic-bezier(.22,1,.36,1);
   --mf-width:36px;--mf-quality-opacity:0;--mf-quality-slide:8px;--mf-quality-events:none;
   position:absolute!important;top:10px!important;right:10px!important;z-index:999!important;
   display:flex!important;align-items:center!important;justify-content:flex-end!important;
   width:var(--mf-width)!important;height:36px!important;
   max-width:min(calc(100% - 20px),var(--mf-player-width,100%))!important;
   overflow:hidden!important;border-radius:999px!important;transform-origin:right center!important;
+  contain:layout style!important;backface-visibility:hidden!important;transform:translateZ(0)!important;
   box-shadow:inset 0 0 0 1px #07111a45,0 1px 2px #0004,0 4px 9px #0003!important;
-  transition:width .3s cubic-bezier(.22,.68,.22,1),scale .36s var(--mf-spring)!important;
+  transition:width .22s var(--mf-expand-ease),scale .32s var(--mf-spring)!important;
 }
 .mediaflow-download-pill:is(:hover,:has(> :focus-visible),[data-menu-open]){
   --mf-width:148px;--mf-quality-opacity:1;--mf-quality-slide:0px;--mf-quality-events:auto;
-  transition:width .46s var(--mf-spring),scale .36s var(--mf-spring)!important;
+  transition:width .24s var(--mf-expand-ease),scale .32s var(--mf-spring)!important;
 }
 .mediaflow-download-pill:has(> button:active){
   scale:.965!important;transition:width .46s var(--mf-spring),scale .12s ease-out!important;
@@ -80,7 +82,7 @@
   transition:opacity .14s ease-out,transform .28s ease-out!important;
 }
 .mediaflow-download-pill:is(:hover,:has(> :focus-visible),[data-menu-open]) > .mediaflow-download-quality{
-  transition:opacity .22s ease-out .06s,transform .38s var(--mf-spring) .035s!important;
+  transition:opacity .18s ease-out .04s,transform .24s var(--mf-expand-ease)!important;
 }
 .mediaflow-download-quality > span{
   display:block!important;min-width:0!important;overflow:hidden!important;text-overflow:ellipsis!important;

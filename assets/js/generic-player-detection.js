@@ -14,7 +14,9 @@ const unsupportedPath=/\.(?:mpd|m4a|mp3|aac|jpg|jpeg|avif|webp|png|svg|gif|vtt|c
 const sitePlayer=/^(?:(?:[^.]+\.)?(?:pornhub\.(?:com|org)|pornhubpremium\.com|redtube\.com|91porn\.com)|xvideos\.com|xvv1deos\.com|xnxx\.(?:com|es)|xhamster\d*\.(?:com|desi)|123av\.com|rou\.video|tangxinvlog\.app|huangguoai\.com)$/i;
 const nativeToolbar='.mgp_controlsBar,.mhp1138_controlsBar';
 const nativePlayer='.mgp_player,.mhp1138_player,.video-element-wrapper-js,[id^="playerDiv"],#player';
-const previewCard='.videoBox,.pcVideoListItem,.thumb-block,.thumb-list__item,.video-card';
+const previewCard='.videoBox,.pcVideoListItem,.thumb-block,.thumb-list__item,.video-card,.video-item,.video-thumb,.thumb-image-container,.videoUList > li';
+const previewClassOrId=/\b(?:thumb(?:nail)?|preview)[-_a-z0-9]*\b|video[-_]?preview|preview[-_]?video/i;
+const previewMediaPath=/(?:^|[/_.-])(?:preview|previews|thumbs?|thumb_vids?|t_video|sprite|teaser)(?:[/_.-]|$)/i;
 const autoplayMarker=['class','id','aria-label','title','data-text','data-action','data-testid']
   .flatMap(attribute=>['autoplay','auto play','auto-play'].map(label=>`[${attribute}*="${label}" i]`)).join(',');
 
@@ -65,6 +67,26 @@ function matchesGenericPlayer(url=globalThis.location?.href || ''){
   return !isXPage(url) && !isMissavPage(url) && !embedded123avPlayer(url);
 }
 
+export function isThumbnailPreviewVideo(video,pageUrl=''){
+  if(!video?.matches?.('video'))return false;
+  if(video.closest?.(previewCard))return true;
+  const classAndId=`${video.getAttribute?.('class') || ''} ${video.id || ''}`;
+  if(previewClassOrId.test(classAndId))return true;
+  const link=video.closest?.('a[href]');
+  if(link){
+    const href=mediaUrl(link.getAttribute?.('href') || link.href,pageUrl);
+    if(href && href!==pageUrl && (recognizedVideoPage(href) || (!video.controls && !video.hasAttribute?.('controls'))))return true;
+  }
+  const silentLoop=Boolean((video.muted || video.hasAttribute?.('muted')) && (video.loop || video.hasAttribute?.('loop')) && !video.controls && !video.hasAttribute?.('controls'));
+  if(silentLoop){
+    const src=mediaUrl(video.getAttribute?.('src') || video.currentSrc || video.querySelector?.('source[src]')?.getAttribute?.('src'),pageUrl);
+    if(src){
+      try{if(previewMediaPath.test(new URL(src).pathname))return true;}catch{}
+    }
+  }
+  return false;
+}
+
 function mainWatchPlayer(host,players,doc=document,pageUrl=location.href){
   if(is91PornPage(pageUrl))return find91PornPlayer(doc);
   if(host==='123av.com'){
@@ -74,7 +96,7 @@ function mainWatchPlayer(host,players,doc=document,pageUrl=location.href){
   }
   let best=null,bestArea=0;
   for(const element of players){
-    if(element.closest(previewCard))continue;
+    if(isThumbnailPreviewVideo(element,pageUrl))continue;
     const {width,height}=element.getBoundingClientRect();
     if(width<80 || height<44)continue;
     const area=width*height;
@@ -126,6 +148,7 @@ export function collectGenericPlayers(doc=globalThis.document,pageUrl=globalThis
   for(const element of candidates){
     const video=element.matches('video');
     if(!pageButton){
+      if(video && isThumbnailPreviewVideo(element,pageUrl))continue;
       const {width,height}=element.getBoundingClientRect();
       if(element.mediaKeys || encrypted?.has(element) || width<80 || height<44 || !visibleArea(element,view))continue;
     }

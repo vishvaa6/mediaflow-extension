@@ -11,7 +11,7 @@ import {
 } from '../assets/js/media-detection.js';
 import {xDetector, installXDetection} from '../assets/js/x-detection.js';
 import {missavDetector, visibleMissavEntries, installMissavDetection} from '../assets/js/missav-detection.js';
-import {genericPlayerDetector, collectGenericPlayers, installGenericPlayerDetection} from '../assets/js/generic-player-detection.js';
+import {genericPlayerDetector, collectGenericPlayers, installGenericPlayerDetection, isThumbnailPreviewVideo} from '../assets/js/generic-player-detection.js';
 
 function makeView({width = 1280, height = 800} = {}) {
   const view = {
@@ -51,6 +51,7 @@ function makeNode({
     matches: selector => selector.split(',').some(part => {
       const s = part.trim();
       if (s === tag) return true;
+      if (s === 'a[href]') return tag === 'a' && node.getAttribute('href') != null;
       if (s.startsWith('.') && node._classes.has(s.slice(1))) return true;
       const attrMatch = s.match(/^\[([^=\]]+)="([^"]+)"\]$/);
       if (attrMatch) return node.getAttribute(attrMatch[1]) === attrMatch[2];
@@ -259,4 +260,69 @@ test('genericPlayerDetector.collect and documentDetector.collect work through ru
   const docMedia = results[1].items;
   assert.equal(docMedia.pageUrl, url);
   assert.ok(docMedia.videoInfos.some(v => v.videoUrl === 'https://cdn.example.test/stream_1080p.m3u8'));
+});
+
+test('genericPlayerDetector excludes thumbnail hover-preview videos while preserving real players', () => {
+  const url = 'https://xhamster.com/categories/featured';
+  const view = makeView();
+  const doc = makeDocument({title: 'Listing'});
+
+  // 1. Video inside a thumbnail card container (.thumb-list__item)
+  const thumbCard = makeNode({tag: 'div', classes: ['thumb-list__item'], parent: doc.body, ownerDocument: doc});
+  const thumbVideo = makeNode({
+    tag: 'video',
+    attrs: {src: 'https://cdn.example.test/clip-1.mp4'},
+    parent: thumbCard,
+    ownerDocument: doc
+  });
+
+  // 2. Video with a preview class name
+  const classPreview = makeNode({
+    tag: 'video',
+    attrs: {class: 'thumb-image-container__video', src: 'https://cdn.example.test/clip-2.mp4'},
+    parent: doc.body,
+    ownerDocument: doc
+  });
+
+  // 3. Video inside an <a href> linking to a watch page
+  const link = makeNode({
+    tag: 'a',
+    attrs: {href: 'https://xhamster.com/videos/demo-12345'},
+    parent: doc.body,
+    ownerDocument: doc
+  });
+  const linkedVideo = makeNode({
+    tag: 'video',
+    attrs: {src: 'https://cdn.example.test/clip-3.mp4'},
+    parent: link,
+    ownerDocument: doc
+  });
+
+  // 4. Silent looping video with preview URL path
+  const silentPreview = makeNode({
+    tag: 'video',
+    attrs: {src: 'https://cdn.example.test/previews/demo.webm', muted: '', loop: ''},
+    parent: doc.body,
+    ownerDocument: doc,
+    extra: {muted: true, loop: true, controls: false, hasAttribute: name => name === 'muted' || name === 'loop'}
+  });
+
+  // 5. Real standalone player video must still be detected
+  const realPlayer = makeNode({
+    tag: 'video',
+    attrs: {src: 'https://cdn.example.test/full-movie-720p.mp4', controls: ''},
+    parent: doc.body,
+    ownerDocument: doc,
+    extra: {controls: true, hasAttribute: name => name === 'controls'}
+  });
+
+  assert.equal(isThumbnailPreviewVideo(thumbVideo, url), true);
+  assert.equal(isThumbnailPreviewVideo(classPreview, url), true);
+  assert.equal(isThumbnailPreviewVideo(linkedVideo, url), true);
+  assert.equal(isThumbnailPreviewVideo(silentPreview, url), true);
+  assert.equal(isThumbnailPreviewVideo(realPlayer, url), false);
+
+  const collected = collectGenericPlayers(doc, url, {view});
+  assert.equal(collected.length, 1);
+  assert.equal(collected[0].element, realPlayer);
 });
