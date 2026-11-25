@@ -38,7 +38,7 @@ const root=path.resolve(__dirname,'..');
     assert.match(await page.locator('html > div').evaluate(el=>getComputedStyle(el).backdropFilter),/blur\(28px\)/);
     assert.equal(await page.locator('html > div').evaluate(el=>getComputedStyle(el).borderRadius),'24px');
     assert.equal(await page.locator('html > div').evaluate(el=>Math.round(el.getBoundingClientRect().width)),900);
-    assert.equal(await page.locator('html > div').evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(23, 24, 29, 0.84)');
+    assert.equal(await page.locator('html > div').evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(8, 8, 12, 0.52)');
     assert.equal(await frame.locator('html').getAttribute('data-surface'),'overlay');
     if(process.env.POPUP_SCREENSHOT){await page.waitForTimeout(500);await page.screenshot({path:process.env.POPUP_SCREENSHOT});}
     const resizeHandle=frame.locator('#btn-resize-popup');

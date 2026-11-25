@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {fetchBytes,transientError,retryAfterMs,retryDelay} from '../assets/js/network.js';
+import {fetchBytes,transientError,retryAfterMs,retryDelay,abortableSleep,withRetry} from '../assets/js/network.js';
+import {HlsDownloader} from '../assets/js/hls-downloader.js';
+import {DirectDownloader} from '../assets/js/direct-downloader.js';
+import {OffscreenDownload} from '../assets/js/offscreen-client.js';
+import {batchProgress} from '../assets/js/batch-progress.js';
 import {installWindowManager} from '../assets/js/window-manager.js';
 import {clampPopupSize} from '../assets/js/popup-surface.js';
 import {readFileSync} from 'node:fs';
@@ -122,4 +126,362 @@ test('toolbar opens an attached popup; source tracking never registers a detache
   assert.equal(clicked.length,0);assert.equal((await manager.source(2)).tab.id,5);assert.equal(data.mediaflowSource.tabId,5);
   const manifest=JSON.parse(readFileSync(new URL('../manifest.json',import.meta.url),'utf8'));
   assert.equal(manifest.action.default_popup,undefined,'toolbar clicks launch the panel without first opening a popup');
+});
+
+function memoryStorageFixture() {
+  const files=new Map();
+  const missing=()=>new DOMException('Missing file','NotFoundError');
+  const root={
+    async getFileHandle(name,{create=false}={}) {
+      if(!files.has(name)){if(!create)throw missing();files.set(name,new Uint8Array());}
+      return {
+        async getFile(){if(!files.has(name))throw missing();return new Blob([files.get(name)]);},
+        async createWritable({keepExistingData=false}={}) {
+          let staged=keepExistingData?files.get(name).slice():new Uint8Array(),position=0;
+          return {
+            async seek(n){position=n;},
+            async write(value){
+              const data=typeof value==='string'?new TextEncoder().encode(value):value instanceof Blob?new Uint8Array(await value.arrayBuffer()):new Uint8Array(value);
+              const next=new Uint8Array(Math.max(staged.length,position+data.length));next.set(staged);next.set(data,position);staged=next;position+=data.length;
+            },
+            async close(){files.set(name,staged);},async abort(){}
+          };
+        }
+      };
+    },
+    async removeEntry(name){if(!files.delete(name))throw missing();},
+    async *entries(){for(const name of [...files.keys()])yield [name,{kind:'file'}];}
+  };
+  return {files,getDirectory:async()=>root};
+}
+
+test('withRetry honours Retry-After, caps backoff, stops on non-transient errors, and aborts promptly on AbortSignal',async()=>{
+  // Already-aborted signal rejects immediately without calling fn.
+  const preAborted=new AbortController();
+  preAborted.abort(new DOMException('Already cancelled','AbortError'));
+  let called=0;
+  await assert.rejects(withRetry(()=>{called++;},{signal:preAborted.signal}),error=>error.name==='AbortError');
+  assert.equal(called,0);
+
+  // Non-transient errors stop immediately on attempt 1 without calling onRetry.
+  for(const nonTransient of [
+    Object.assign(Error('HTTP 403'),{code:'HTTP',status:403}),
+    Object.assign(Error('HTTP 404'),{code:'HTTP',status:404}),
+    new DOMException('Disk full','QuotaExceededError'),
+    Error('Unexpected permanent failure')
+  ]){
+    let attempts=0,retries=0;
+    await assert.rejects(withRetry(()=>{attempts++;throw nonTransient;},{attempts:4,baseDelay:0,onRetry:()=>{retries++;}}));
+    assert.equal(attempts,1);assert.equal(retries,0);
+  }
+
+  // Honours Retry-After (above attempt-1 exponential backoff) and succeeds on retry.
+  const retryLog=[];
+  let attemptCount=0;
+  const started=Date.now();
+  const value=await withRetry(async()=>{
+    attemptCount++;
+    if(attemptCount===1)throw Object.assign(Error('HTTP 429: rate limited'),{code:'HTTP',status:429,retryAfter:1350});
+    return 'recovered';
+  },{attempts:4,onRetry:(attempt,ms,err)=>retryLog.push({attempt,ms,status:err.status})});
+  const elapsed=Date.now()-started;
+  assert.equal(value,'recovered');
+  assert.equal(attemptCount,2);
+  assert.deepEqual(retryLog,[{attempt:1,ms:1350,status:429}]);
+  assert.ok(elapsed>=1250,`expected Retry-After delay >= 1250ms, got ${elapsed}ms`);
+
+  // Caps Retry-After at 2 minutes (120000ms) and aborts promptly during backoff sleep.
+  const capController=new AbortController();
+  let cappedMs=0;
+  const abortStart=Date.now();
+  await assert.rejects(withRetry(async()=>{
+    throw Object.assign(Error('HTTP 429'),{code:'HTTP',status:429,retryAfter:500000});
+  },{
+    attempts:4,
+    signal:capController.signal,
+    onRetry:(_attempt,ms)=>{cappedMs=ms;setTimeout(()=>capController.abort(new DOMException('Paused','AbortError')),20);}
+  }),error=>error.name==='AbortError');
+  assert.equal(cappedMs,120000);
+  assert.ok(Date.now()-abortStart<400,'backoff sleep must abort promptly on AbortSignal');
+
+  // Exponential backoff + TypeError normalization + exhausting attempts.
+  const expDelays=[];
+  let netCalls=0;
+  await assert.rejects(withRetry(async()=>{
+    netCalls++;
+    throw new TypeError('Failed to fetch');
+  },{attempts:3,baseDelay:10,onRetry:(attempt,ms,err)=>expDelays.push({attempt,ms,code:err.code})}),error=>error.code==='NETWORK');
+  assert.equal(netCalls,3);
+  assert.equal(expDelays.length,2);
+  assert.equal(expDelays[0].attempt,1);assert.equal(expDelays[0].code,'NETWORK');assert.ok(expDelays[0].ms>=10 && expDelays[0].ms<=12);
+  assert.equal(expDelays[1].attempt,2);assert.ok(expDelays[1].ms>=20 && expDelays[1].ms<=24);
+
+  // abortableSleep rejects promptly when aborted mid-sleep.
+  const sleepController=new AbortController();
+  const sleepStart=Date.now();
+  setTimeout(()=>sleepController.abort(new DOMException('Stop','AbortError')),15);
+  await assert.rejects(abortableSleep(60000,sleepController.signal),error=>error.name==='AbortError');
+  assert.ok(Date.now()-sleepStart<400);
+});
+
+test('HlsDownloader retries HTTP 429 with Retry-After, emits retrying metadata, and finishes cleanly',async()=>{
+  const storage=memoryStorageFixture();
+  const playlist='#EXTM3U\n#EXTINF:2,\nseg-0.ts\n#EXTINF:2,\nseg-1.ts\n#EXT-X-ENDLIST';
+  const progress=[],calls=[];
+  let seg1Attempts=0,saved=false,failure;
+  const startTime=Date.now();
+  const engine=new HlsDownloader({
+    storage,
+    maxConcurrent:1,
+    retryInterval:10,
+    fetcher:async url=>{
+      calls.push(url);
+      if(url.endsWith('.m3u8'))return new Response(playlist);
+      if(url.includes('seg-0'))return new Response(Uint8Array.of(1,11));
+      seg1Attempts++;
+      if(seg1Attempts===1)return new Response('',{status:429,headers:{'Retry-After':'0.08'}});
+      return new Response(Uint8Array.of(2,12));
+    },
+    onProgress:data=>progress.push(structuredClone(data)),
+    saveFile:async()=>{saved=true;},
+    onFailure:err=>{failure=err;}
+  });
+  await engine.start('https://video.test/list.m3u8',{opfsFileName:'hls-429.ts',fileName:'hls-429',quality:'best'});
+  assert.equal(failure,undefined);
+  assert.equal(saved,true);
+  assert.equal(seg1Attempts,2);
+  assert.ok(Date.now()-startTime>=65,'HlsDownloader must honour Retry-After delay');
+  assert.deepEqual([...storage.files.get('hls-429.ts')],[1,11,2,12]);
+
+  const retryingEvents=progress.filter(event=>event.retrying===true);
+  assert.equal(retryingEvents.length,1);
+  assert.equal(retryingEvents[0].phase,'retrying');
+  assert.equal(retryingEvents[0].retryAttempt,1);
+  assert.equal(retryingEvents[0].retryMax,4);
+  assert.ok(retryingEvents[0].retryAt>startTime);
+  assert.match(retryingEvents[0].retryError,/429/);
+
+  const retryIndex=progress.findIndex(event=>event.retrying===true);
+  const afterRetry=progress.slice(retryIndex+1).find(event=>event.finishNum===2);
+  assert.ok(afterRetry,'progress after recovery must be emitted');
+  assert.equal(afterRetry.retrying,false);
+  assert.equal(afterRetry.phase,'downloading');
+
+  // Pausing during an HLS Retry-After backoff aborts promptly without reporting an error.
+  const pauseStorage=memoryStorageFixture();
+  let pauseErr;
+  const pauseEngine=new HlsDownloader({
+    storage:pauseStorage,
+    maxConcurrent:1,
+    fetcher:async url=>{
+      if(url.endsWith('.m3u8'))return new Response(playlist);
+      return new Response('',{status:429,headers:{'Retry-After':'60'}});
+    },
+    onProgress:data=>{if(data.retrying)queueMicrotask(()=>pauseEngine.pauseSoft());},
+    saveFile:async()=>assert.fail('Paused HLS must not save'),
+    onFailure:err=>{pauseErr=err;}
+  });
+  const pauseStart=Date.now();
+  await pauseEngine.start('https://video.test/list.m3u8',{opfsFileName:'hls-pause.ts',fileName:'hls-pause',quality:'best'});
+  assert.equal(pauseErr,undefined);
+  assert.ok(Date.now()-pauseStart<500,'pauseSoft must interrupt HLS retry backoff promptly');
+});
+
+test('DirectDownloader recovers from mid-stream drop and HTTP 503 resuming from exact bytesReceived without corruption',async()=>{
+  const storage=memoryStorageFixture();
+  const payload=Uint8Array.from({length:16384},(_,i)=>(i*31+7)&255);
+  // Start with an MP4 ftyp header so media sniffing passes cleanly.
+  payload.set([0x00,0x00,0x00,0x18,0x66,0x74,0x79,0x70,0x69,0x73,0x6f,0x6d],0);
+  const ranges=[],progress=[];
+  let requestNum=0,saved=false,completed=false,failure;
+  const engine=new DirectDownloader({
+    storage,
+    maxAttempts:4,
+    retryInterval:10,
+    saveFile:async()=>{saved=true;},
+    fetcher:async(_url,{headers})=>{
+      requestNum++;
+      ranges.push(headers.get('Range'));
+      if(requestNum===1){
+        // Stream 4096 bytes across 3 chunks then drop mid-stream with a transient network error.
+        const chunks=[payload.slice(0,1024),payload.slice(1024,2048),payload.slice(2048,4096)];
+        return new Response(new ReadableStream({
+          pull(controller){
+            if(chunks.length)controller.enqueue(chunks.shift());
+            else controller.error(new TypeError('network error'));
+          }
+        }),{status:200,headers:{'Content-Length':String(payload.length)}});
+      }
+      if(requestNum===2){
+        // Transient HTTP 503 with Retry-After on the resumed range request.
+        return new Response('',{status:503,headers:{'Retry-After':'0.06'}});
+      }
+      if(requestNum===3){
+        // Resume from exact offset 4096, deliver up to 10000, then close prematurely.
+        return new Response(payload.slice(4096,10000),{
+          status:206,
+          headers:{'Content-Range':`bytes 4096-${payload.length-1}/${payload.length}`,'Content-Length':String(payload.length-4096)}
+        });
+      }
+      // Final request resumes from exact offset 10000 and delivers the remainder.
+      return new Response(payload.slice(10000),{
+        status:206,
+        headers:{'Content-Range':`bytes 10000-${payload.length-1}/${payload.length}`,'Content-Length':String(payload.length-10000)}
+      });
+    }
+  });
+  const started=Date.now();
+  await engine.start({
+    url:'https://cdn.test/video.mp4',
+    fileName:'video',
+    opfsFileName:'direct-resume.mp4',
+    onProgress:data=>progress.push(structuredClone(data)),
+    onComplete:()=>{completed=true;},
+    onFailure:err=>{failure=err;}
+  });
+  assert.equal(failure,undefined);
+  assert.equal(saved,true);
+  assert.equal(completed,true);
+  assert.equal(engine.getBytesReceived(),payload.length);
+  assert.ok(Date.now()-started>=50,'DirectDownloader must honour Retry-After on 503');
+  assert.deepEqual(ranges,[null,'bytes=4096-','bytes=4096-','bytes=10000-']);
+  assert.deepEqual(storage.files.get('direct-resume.mp4'),payload,'resumed output must match original bytes without corruption');
+
+  const retryingEvents=progress.filter(event=>event.retrying===true);
+  assert.equal(retryingEvents.length,3);
+  assert.deepEqual(retryingEvents.map(event=>event.retryAttempt),[1,2,3]);
+  assert.ok(retryingEvents.every(event=>event.retryMax===4 && event.phase==='retrying' && event.retryAt>started && typeof event.retryError==='string' && event.retryError.length>0));
+  assert.equal(retryingEvents[0].bytesReceived,4096);
+  assert.equal(retryingEvents[1].bytesReceived,4096);
+  assert.match(retryingEvents[1].retryError,/503/);
+  assert.equal(retryingEvents[2].bytesReceived,10000);
+
+  const lastRetryIdx=progress.findLastIndex(event=>event.retrying===true);
+  const resumedProgress=progress.slice(lastRetryIdx+1).find(event=>event.bytesReceived===payload.length && !event.isFileDownloading);
+  assert.ok(resumedProgress,'downloading progress after final retry must be emitted');
+  assert.equal(resumedProgress.retrying,false);
+  assert.equal(resumedProgress.phase,'downloading');
+
+  // Non-transient error (HTTP 403) does not retry and emits no retrying events.
+  const failStorage=memoryStorageFixture(),failProgress=[];
+  let failCalls=0,failErr;
+  const failEngine=new DirectDownloader({
+    storage:failStorage,
+    retries:3,
+    retryInterval:0,
+    saveFile:async()=>assert.fail('403 must not save'),
+    fetcher:async()=>{failCalls++;return new Response('',{status:403});}
+  });
+  await failEngine.start({
+    url:'https://cdn.test/forbidden.mp4',
+    fileName:'forbidden',
+    opfsFileName:'forbidden.mp4',
+    onProgress:data=>failProgress.push(data),
+    onFailure:err=>{failErr=err;}
+  });
+  assert.equal(failCalls,1);
+  assert.equal(failErr?.status,403);
+  assert.equal(failProgress.some(event=>event.retrying),false);
+
+  // Pausing during DirectDownloader backoff aborts promptly and preserves committed bytes.
+  const pauseStorage=memoryStorageFixture();
+  let pauseReq=0,pauseErr;
+  const pauseEngine=new DirectDownloader({
+    storage:pauseStorage,
+    maxAttempts:4,
+    saveFile:async()=>assert.fail('Paused direct download must not save'),
+    fetcher:async()=>{
+      pauseReq++;
+      if(pauseReq===1){
+        const chunks=[payload.slice(0,1024),payload.slice(1024,2048)];
+        return new Response(new ReadableStream({
+          pull(controller){
+            if(chunks.length)controller.enqueue(chunks.shift());
+            else controller.error(new TypeError('network error'));
+          }
+        }),{status:200,headers:{'Content-Length':String(payload.length)}});
+      }
+      return new Response('',{status:503,headers:{'Retry-After':'60'}});
+    }
+  });
+  const pauseStart=Date.now();
+  await pauseEngine.start({
+    url:'https://cdn.test/pause.mp4',
+    fileName:'pause',
+    opfsFileName:'direct-pause.mp4',
+    onProgress:data=>{if(data.retrying)queueMicrotask(()=>pauseEngine.pauseSoft());},
+    onFailure:err=>{pauseErr=err;}
+  });
+  assert.equal(pauseErr,undefined);
+  assert.ok(Date.now()-pauseStart<500,'pauseSoft must interrupt direct retry backoff promptly');
+  assert.deepEqual(pauseStorage.files.get('direct-pause.mp4'),payload.slice(0,2048));
+});
+
+test('HlsDownloader retries playlist HTTP 429 and OffscreenDownload forwards retrying metadata intact',async()=>{
+  const storage=memoryStorageFixture();
+  const playlist='#EXTM3U\n#EXTINF:2,\nseg-0.ts\n#EXT-X-ENDLIST';
+  let playlistCalls=0,saved=false,failure;
+  const progress=[];
+  const engine=new HlsDownloader({
+    storage,
+    maxConcurrent:1,
+    retryInterval:10,
+    fetcher:async url=>{
+      if(url.endsWith('.m3u8')){
+        playlistCalls++;
+        if(playlistCalls===1)return new Response('',{status:429,headers:{'Retry-After':'0.05'}});
+        return new Response(playlist);
+      }
+      return new Response(Uint8Array.of(7,8));
+    },
+    onProgress:data=>progress.push(structuredClone(data)),
+    saveFile:async()=>{saved=true;},
+    onFailure:err=>{failure=err;}
+  });
+  await engine.start('https://video.test/list.m3u8',{opfsFileName:'hls-pl-429.ts',fileName:'hls-pl-429',quality:'best'});
+  assert.equal(failure,undefined);assert.equal(saved,true);assert.equal(playlistCalls,2);
+  assert.deepEqual([...storage.files.get('hls-pl-429.ts')],[7,8]);
+  assert.ok(progress.some(event=>event.retrying===true && event.retryAttempt===1 && event.retryMax===4 && /429/.test(event.retryError)));
+
+  // OffscreenDownload + progress-reporter flush retry metadata promptly and clear it on recovery.
+  const forwarded=[],emitted=[];
+  const client=new OffscreenDownload({task:{id:'t1',cachedBytes:0},ensureOffscreen:async()=>{},saveFile:async()=>{},onProgress:data=>forwarded.push(data)});
+  client.runId='run-1';
+  const reporter=createProgressReporter(data=>emitted.push(data),250);
+  const workerOnProgress=data=>{
+    if(data.retrying){reporter.update({phase:'retrying',...data});reporter.flush();}
+    else reporter.update({phase:'downloading',retrying:false,retryAt:undefined,retryAttempt:undefined,retryMax:undefined,retryError:undefined,...data});
+  };
+  workerOnProgress({bytesReceived:100,progress:10});
+  const retryAt=Date.now()+2000;
+  workerOnProgress({bytesReceived:100,progress:10,retrying:true,retryAt,retryAttempt:1,retryMax:4,retryError:'HTTP 429'});
+  workerOnProgress({bytesReceived:100,progress:10,retrying:true,retryAt:retryAt+2000,retryAttempt:2,retryMax:4,retryError:'HTTP 429'});
+  workerOnProgress({bytesReceived:200,progress:20});
+  reporter.dispose();
+  assert.equal(emitted.length,4,'retrying transitions and consecutive retry attempts must flush immediately');
+  for(const data of emitted)await client.handle({runId:'run-1',event:'progress',data});
+  assert.equal(forwarded[1].retrying,true);assert.equal(forwarded[1].retryAttempt,1);assert.equal(forwarded[1].retryMax,4);assert.equal(forwarded[1].retryAt,retryAt);assert.equal(forwarded[1].retryError,'HTTP 429');
+  assert.equal(forwarded[2].retrying,true);assert.equal(forwarded[2].retryAttempt,2);
+  assert.equal(forwarded[3].retrying,false);assert.equal(forwarded[3].retryAt,undefined);assert.equal(forwarded[3].retryAttempt,undefined);assert.equal(forwarded[3].phase,'downloading');
+  assert.equal(client.getBytesReceived(),200);
+});
+
+test('batchProgress counts retrying tasks as active and keeps the batch unfinished',()=>{
+  const batch={id:'b1',status:'complete',total:3,processed:3,skipped:0,failed:0};
+  const summary=batchProgress(batch,[
+    {id:'t1',batchId:'b1',status:'retrying',retryAt:Date.now()+2000,retryAttempt:1,retryMax:4},
+    {id:'t2',batchId:'b1',status:'downloading'},
+    {id:'other',batchId:'b2',status:'retrying'}
+  ],[{id:'t3',batchId:'b1'}]);
+  assert.equal(summary.counts.active,2);
+  assert.equal(summary.counts.completed,1);
+  assert.equal(summary.finished,false);
+  assert.match(summary.text,/2 active/);
+
+  const onlyRetrying=batchProgress({id:'b1',status:'complete',total:1,processed:1,skipped:0,failed:0},[
+    {id:'t1',batchId:'b1',status:'retrying'}
+  ],[]);
+  assert.equal(onlyRetrying.counts.active,1);
+  assert.equal(onlyRetrying.finished,false);
+  assert.notEqual(onlyRetrying.label,'All downloads completed');
 });

@@ -2,6 +2,7 @@ import {expandHlsChoices} from './hls-playlist.js';
 import {icon} from './icons.js';
 import {videoKey} from './video-details.js';
 import {notifyIfContextInvalid} from './extension-context.js';
+import {ensureCspSafeGlassDefs} from './liquid-optics.js';
 
 const height=video=>Number(String(video.quality || '').match(/\d+/)?.[0]) || 0;
 const validVariants=videos=>videos.filter(video=>video?.videoUrl && ['mp4','webm','m3u8'].includes(video.format));
@@ -58,16 +59,28 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
     setStyle(record.menu,'transform-origin',openBelow?'top right':'bottom right');
     setStyle(record.menu,'--mf-menu-offset',openBelow?'-6px':'6px');
   }
-  function loadPlaylists(videos){
+  function expandedMasterUrls(videos){
+    const covered=new Set();
     for(const video of videos){
-      if(!expandPlaylist || video.format!=='m3u8')continue;
+      const entry=playlists.get(video.videoUrl);
+      if(!entry?.choices?.length)continue;
+      if(entry.choices.some(choice=>choice.videoUrl!==video.videoUrl)){
+        for(const choice of entry.choices)covered.add(choice.videoUrl);
+      }
+    }
+    return covered;
+  }
+  function loadPlaylists(videos){
+    const covered=expandedMasterUrls(videos);
+    for(const video of videos){
+      if(!expandPlaylist || video.format!=='m3u8' || covered.has(video.videoUrl))continue;
       const cached=playlists.get(video.videoUrl);
       if(cached && (!cached.retryAfter || cached.retryAfter>Date.now()))continue;
       const result={pending:true};
       playlists.set(video.videoUrl,result);
       while(playlists.size>64)playlists.delete(playlists.keys().next().value);
       expandPlaylist(video).then(choices=>{
-        result.choices=choices.map(({videoUrl,quality})=>({videoUrl,quality}));
+        result.choices=choices.map(({videoUrl,quality,headers})=>({videoUrl,quality,...(headers?{headers}:{})}));
       },()=>{result.retryAfter=Date.now()+30000;}).finally(()=>{
         result.pending=false;
         sync(latest);
@@ -75,9 +88,13 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
     }
   }
   function choicesFor(videos){
+    const covered=expandedMasterUrls(videos);
     const unique=new Map();
     for(const video of videos){
-      const sources=playlists.get(video.videoUrl)?.choices?.map(choice=>({...video,...choice})) || [video];
+      const cached=playlists.get(video.videoUrl)?.choices;
+      const isMaster=Boolean(cached?.some(choice=>choice.videoUrl!==video.videoUrl));
+      if(!isMaster && covered.has(video.videoUrl))continue;
+      const sources=cached?.map(choice=>({...video,...choice})) || [video];
       for(const source of sources){
         const key=qualityKey(source);
         if(!unique.has(key))unique.set(key,source);
@@ -140,8 +157,11 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
     }
   }
   document.addEventListener('mediaflow:context-invalidated',showReconnect);
+  const isInteracting=record=>Boolean(record?.pill?.matches?.(':hover,:focus-within') || record?.menu?.matches?.(':popover-open'));
   function removeControl(player,record){
-    clearTimeout(record.messageTimer);record.glintMotion?.forEach(animation=>animation.cancel());
+    clearTimeout(record.messageTimer);clearTimeout(record.removeTimer);clearTimeout(record.tapTimer);record.removeTimer=0;record.tapTimer=0;
+    if(record.glintFrame){cancelAnimationFrame(record.glintFrame);record.glintFrame=0;}
+    record.glintMotion?.forEach(animation=>animation.cancel());
     record.pill.remove();record.message.remove();controls.delete(player);
     if(record.positioned && ![...controls.values()].some(other=>other.host===record.host))record.host.classList.remove('mediaflow-download-host');
   }
@@ -160,6 +180,12 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
   function sync(entries){
     if(contextInvalid)return;
     latest=entries;
+    if(entries.length && document.documentElement){
+      ensureCspSafeGlassDefs(document.documentElement,'player',[
+        {id:'mf-clear-pill-lens',erode:2,blur:5,preBlur:0.4,scale:20,dispersion:0.14},
+        {id:'mf-regular-menu-lens',erode:3,blur:8,preBlur:0.9,scale:22,dispersion:0.12}
+      ]);
+    }
     const present=new Set();
     for(const entry of entries){
       const player=entry.element;
@@ -168,6 +194,7 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
       if(!host)continue;
       const fixed=host.matches('body,html');
       present.add(player);let record=controls.get(player);
+      if(record?.removeTimer){clearTimeout(record.removeTimer);record.removeTimer=0;}
       if(record && record.host!==host){removeControl(player,record);record=null;}
       if(!record){
         const claimed=new Set([...controls.values()].flatMap(control=>[control.pill,control.message]));
@@ -198,30 +225,54 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
         const positioned=!fixed && (host.classList.contains('mediaflow-download-host') || getComputedStyle(host).position==='static');
         if(positioned)host.classList.add('mediaflow-download-host');
         host.append(message);
-        record={pill,button,trigger,label,menu,options,note,message,host,positioned,entry,mediaId:'',selectedUrl:'',selectedQuality:'',optionSignature:''};
+        record={pill,button,trigger,label,menu,options,note,message,host,positioned,entry,mediaId:'',selectedUrl:'',selectedQuality:'',optionSignature:'',removeTimer:0,glintFrame:0,expandingUntil:0,lastPos:null,pendingLeaveSync:false};
         controls.set(player,record);
-        const retryDock=()=>{
-          if(record.entry.toolbarAnchor && !record.toolbarAnchor)requestAnimationFrame(()=>sync(latest));
+        const onInteractionEnd=()=>{
+          if(record.pendingLeaveSync || record.removeTimer || record.entry.toolbarAnchor && !record.toolbarAnchor){
+            record.pendingLeaveSync=false;
+            requestAnimationFrame(()=>sync(latest));
+          }
         };
-        pill.addEventListener('pointerleave',retryDock);
-        pill.addEventListener('focusout',retryDock);
+        pill.addEventListener('pointerenter',()=>{record.expandingUntil=performance.now()+260;},{passive:true});
+        pill.addEventListener('pointerleave',onInteractionEnd);
+        pill.addEventListener('focusout',onInteractionEnd);
         pill.addEventListener('pointermove',event=>{
-          if(reducedMotion.matches || event.pointerType==='touch' || menu.contains(event.target))return;
-          if(!record.glintMotion){
-            // Move the light inside the fixed rim mask without changing the page DOM.
-            record.glintMotion=['backgroundPositionX','backgroundPositionY'].map(property=>{
-              const animation=glint.animate([{[property]:'100%'},{[property]:'0%'}],{duration:1000,fill:'both'});
-              animation.pause();return animation;
-            });
-          }
-          const rect=pill.getBoundingClientRect();
-          if(rect.width && rect.height){
-            const position=[(event.clientX-rect.left)/rect.width,(event.clientY-rect.top)/rect.height];
-            record.glintMotion.forEach((animation,index)=>{animation.currentTime=1000*Math.max(0,Math.min(1,position[index]));});
-          }
+          if(reducedMotion.matches || event.pointerType==='touch' || menu.contains(event.target) || performance.now()<record.expandingUntil)return;
+          const clientX=event.clientX,clientY=event.clientY;
+          if(record.glintFrame)return;
+          record.glintFrame=requestAnimationFrame(()=>{
+            record.glintFrame=0;
+            if(!pill.isConnected || reducedMotion.matches)return;
+            if(!record.glintMotion){
+              // Move the light inside the fixed rim mask without changing the page DOM.
+              record.glintMotion=['backgroundPositionX','backgroundPositionY'].map(property=>{
+                const animation=glint.animate([{[property]:'100%'},{[property]:'0%'}],{duration:1000,fill:'both'});
+                animation.pause();return animation;
+              });
+            }
+            const rect=pill.getBoundingClientRect();
+            if(rect.width && rect.height){
+              const position=[(clientX-rect.left)/rect.width,(clientY-rect.top)/rect.height];
+              record.glintMotion.forEach((animation,index)=>{animation.currentTime=1000*Math.max(0,Math.min(1,position[index]));});
+            }
+          });
         },{passive:true});
         for(const name of ['pointerdown','mousedown','touchstart'])button.addEventListener(name,event=>event.stopPropagation());
         for(const node of [trigger,menu])for(const name of ['pointerdown','mousedown','touchstart','click','keydown','keyup'])node.addEventListener(name,event=>event.stopPropagation());
+        const pulsePill=event=>{
+          if(reducedMotion.matches)return;
+          const rect=pill.getBoundingClientRect();
+          if(!rect.width || !rect.height)return;
+          pill.style.setProperty('--mf-tap-x',`${Math.max(0,Math.min(100,(event.clientX-rect.left)/rect.width*100)).toFixed(1)}%`);
+          pill.style.setProperty('--mf-tap-y',`${Math.max(0,Math.min(100,(event.clientY-rect.top)/rect.height*100)).toFixed(1)}%`);
+          pill.removeAttribute('data-energized');
+          void pill.offsetWidth;
+          pill.setAttribute('data-energized','');
+          clearTimeout(record.tapTimer);
+          record.tapTimer=setTimeout(()=>pill.removeAttribute('data-energized'),380);
+        };
+        button.addEventListener('pointerdown',pulsePill,{passive:true});
+        trigger.addEventListener('pointerdown',pulsePill,{passive:true});
         button.addEventListener('click',event=>{event.preventDefault();event.stopImmediatePropagation();if(event.isTrusted)download(record);});
         menu.addEventListener('beforetoggle',event=>{
           const open=event.newState==='open';
@@ -267,13 +318,25 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
         const rect=player.getBoundingClientRect(),parent=host.getBoundingClientRect();
         const top=Math.round(fixed?rect.top:rect.top-parent.top-host.clientTop+host.scrollTop);
         const right=Math.round(fixed?document.documentElement.clientWidth-rect.right:parent.left+host.clientLeft+host.clientWidth-rect.right-host.scrollLeft);
-        if(fixed)setStyle(record.message,'position','fixed');
-        if(!anchor){
-          if(fixed)setStyle(record.pill,'position','fixed');
-          setStyle(record.pill,'--mf-player-width',`${Math.max(0,Math.round(rect.width)-20)}px`);
-          setStyle(record.pill,'top',`${top+10}px`);setStyle(record.pill,'right',`${right+10}px`);
+        const playerWidth=Math.max(0,Math.round(rect.width)-20);
+        const minorHoverShift=Boolean(
+          isInteracting(record) && record.lastPos &&
+          Math.abs(top-record.lastPos.top)<=6 &&
+          Math.abs(right-record.lastPos.right)<=6 &&
+          Math.abs(playerWidth-record.lastPos.width)<=12
+        );
+        if(minorHoverShift){
+          record.pendingLeaveSync=true;
+        }else{
+          record.lastPos={top,right,width:playerWidth};
+          if(fixed)setStyle(record.message,'position','fixed');
+          if(!anchor){
+            if(fixed)setStyle(record.pill,'position','fixed');
+            setStyle(record.pill,'--mf-player-width',`${playerWidth}px`);
+            setStyle(record.pill,'top',`${top+10}px`);setStyle(record.pill,'right',`${right+10}px`);
+          }
+          setStyle(record.message,'top',`${top+48}px`);setStyle(record.message,'right',`${right+10}px`);
         }
-        setStyle(record.message,'top',`${top+48}px`);setStyle(record.message,'right',`${right+10}px`);
       }
       if(!samePlayer(record.entry,entry)){
         record.menu.hidePopover();setMessage(record,'');record.mediaId='';record.selectedUrl='';record.selectedQuality='';
@@ -281,11 +344,12 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
       record.entry=entry;
       const sources=validVariants(variants(entry)),open=record.menu.matches(':popover-open');
       if(open){loadPlaylists(sources);positionMenu(record);}
+      const covered=expandedMasterUrls(sources);
       const videos=choicesFor(sources),mediaId=identity(entry,sources[0]);
       if(record.mediaId!==mediaId){record.mediaId=mediaId;record.selectedUrl='';record.selectedQuality=selections.get(mediaId) || '';}
       const video=selectedVideo(record,videos),id=identity(entry,video);
-      updateChoices(record,videos.filter(choice=>!playlists.get(choice.videoUrl)?.pending),video);
-      const checking=sources.some(source=>playlists.get(source.videoUrl)?.pending);
+      updateChoices(record,videos.filter(choice=>covered.has(choice.videoUrl) || !playlists.get(choice.videoUrl)?.pending),video);
+      const checking=sources.some(source=>!covered.has(source.videoUrl) && playlists.get(source.videoUrl)?.pending);
       const note=checking?'Checking HLS qualities…':record.loadingEntry?'Detecting video…':videos.length?'':unavailable(entry) || 'No downloadable qualities found.';
       if(record.note.textContent!==note)record.note.textContent=note;
       if(record.note.hidden!==!note)record.note.hidden=!note;
@@ -300,6 +364,18 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
       record.button.setAttribute('aria-label',label);
     }
     for(const [player,record] of controls)if(!present.has(player)){
+      if(isInteracting(record) && record.host?.isConnected){
+        record.pendingLeaveSync=true;
+        if(!record.removeTimer){
+          record.removeTimer=setTimeout(()=>{
+            record.removeTimer=0;
+            if(controls.get(player)===record && !latest.some(entry=>entry.element===player) && !isInteracting(record)){
+              removeControl(player,record);
+            }
+          },250);
+        }
+        continue;
+      }
       removeControl(player,record);
     }
   }

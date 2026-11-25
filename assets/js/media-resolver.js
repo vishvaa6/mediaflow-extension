@@ -14,6 +14,32 @@ function playlistVariants(text, baseUrl) {
     .map(variant=>({format:'m3u8',quality:variant.height,videoUrl:variant.url}));
 }
 const height = definition => mediaHeight(definition.quality);
+function normalizeResolvedFormat(rawFormat, resolvedUrl) {
+  if (/m3u8|mpegurl|^hls$/i.test(rawFormat || '') || /\.m3u8\/?(?:[?#]|$)/i.test(resolvedUrl)) return 'm3u8';
+  if (/webm/i.test(rawFormat || '') || /\.webm\/?(?:[?#]|$)/i.test(resolvedUrl)) return 'webm';
+  return rawFormat && /^(?:mp4|webm|m3u8)$/i.test(rawFormat) ? rawFormat.toLowerCase() : 'mp4';
+}
+function collectMetadataItems(node, parentFormat, parentQuality = 0, depth = 0, visited = new Set()) {
+  if (!node || typeof node !== 'object' || depth > 8 || visited.has(node)) return [];
+  visited.add(node);
+  if (Array.isArray(node)) {
+    return node.flatMap(item => collectMetadataItems(item, parentFormat, parentQuality, depth + 1, visited));
+  }
+  const items = [];
+  const rawUrl = node.videoUrl || node.url || node.src || node.file;
+  const quality = node.quality || node.label || node.height || node.res || parentQuality;
+  const format = node.format || node.type || parentFormat;
+  if (typeof rawUrl === 'string' && rawUrl.trim()) {
+    items.push({...node, videoUrl: rawUrl, quality, format});
+  }
+  for (const [key, value] of Object.entries(node)) {
+    if (value && typeof value === 'object') {
+      const keyFormat = /hls|m3u8/i.test(key) ? 'm3u8' : /webm/i.test(key) ? 'webm' : /mp4/i.test(key) ? 'mp4' : format;
+      items.push(...collectMetadataItems(value, keyFormat, mediaHeight(key) || quality, depth + 1, visited));
+    }
+  }
+  return items;
+}
 export function chooseDefinition(definitions, preference,{preferMp4=false}={}) {
   const sorted = definitions.filter(def => def.videoUrl).sort((a,b) => height(b)-height(a) || (preferMp4?Number(b.format==='mp4')-Number(a.format==='mp4'):0));
   if (preference === 'mp4') return sorted.find(def => def.format === 'mp4');
@@ -23,18 +49,35 @@ export function chooseDefinition(definitions, preference,{preferMp4=false}={}) {
 export async function collectMediaSources(html,pageUrl,fetchText,requiredFormat) {
   const is91Watch=is91PornWatchPage(pageUrl);
   const media = extractMedia(is91Watch ? extract91PornPlayerMarkup(html) : html), definitions = [];
+  const addDefinition = item => {
+    const q = height(item);
+    const existing = definitions.find(def => def.videoUrl === item.videoUrl && def.format === item.format && (height(def) === q || !height(def) || !q));
+    if (existing) {
+      if (!height(existing) && q) existing.quality = item.quality;
+      return;
+    }
+    definitions.push(item);
+  };
   const site = is91Watch ? [] : await siteDefinitions(html,pageUrl,fetchText);
   for (const definition of [...site,...media.definitions]) {
     if (!definition.videoUrl) continue;
     const url = new URL(decode(definition.videoUrl),pageUrl).href;
-    const format = definition.format === 'hls' || definition.format === 'm3u8' || /\.m3u8(?:[?#]|$)/i.test(url) ? 'm3u8' : definition.format || 'mp4';
+    const format = normalizeResolvedFormat(definition.format, url);
     if (requiredFormat && format !== requiredFormat) continue;
     if (definition.isMetadata) {
       try {
-        const result = JSON.parse(await fetchText(url,{Referer:pageUrl}));
-        if (Array.isArray(result)) definitions.push(...result.map(def => ({...def,videoUrl:new URL(decode(def.videoUrl),url).href,format:'mp4',headers:definition.headers})));
-      } catch { /* Other definitions may still provide a working stream. */ }
-    } else definitions.push({...definition,videoUrl:url,format});
+        const result = JSON.parse(await fetchText(url,definition.headers || {Referer:pageUrl}));
+        for (const item of collectMetadataItems(result, format)) {
+          const itemUrl = new URL(decode(item.videoUrl), url).href;
+          const itemFormat = normalizeResolvedFormat(item.format, itemUrl);
+          if (requiredFormat && itemFormat !== requiredFormat) continue;
+          addDefinition({...item, videoUrl: itemUrl, format: itemFormat, headers: definition.headers});
+        }
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        /* Other definitions may still provide a working stream. */
+      }
+    } else addDefinition({...definition,videoUrl:url,format});
   }
   return {definitions,title:media.title};
 }

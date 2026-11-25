@@ -9,7 +9,7 @@ export function networkError(error) {
   return error instanceof Error ? error : Error(String(error));
 }
 export const transientError = error => ['TIMEOUT','NETWORK'].includes(error?.code) || [408,429,474].includes(error?.status) || error?.status >= 500 && error?.status <= 599;
-export const errorData = error => ({message:error?.message || String(error),code:error?.code,status:error?.status,retryAfter:error?.retryAfter});
+export const errorData = error => ({message:error?.message || String(error),code:error?.code,status:error?.status,retryAfter:error?.retryAfter,...(error?.needsSourceRefresh?{needsSourceRefresh:true}:{})});
 export const restoreError = value => Object.assign(Error(value?.message || String(value)),value);
 export function retryDelay(attempt,retryAfter=0) {
   const count=Number.isFinite(Number(attempt))?Math.max(1,Math.floor(Number(attempt))):1;
@@ -18,8 +18,39 @@ export function retryDelay(attempt,retryAfter=0) {
 }
 export function retryAfterMs(value,now=Date.now()) {
   if (!value) return 0;
-  const delay=/^\d+(?:\.\d+)?$/.test(value) ? Number(value)*1000 : Date.parse(value)-now;
+  const text=String(value).trim();
+  const delay=/^\d+(?:\.\d+)?$/.test(text) ? Number(text)*1000 : Date.parse(text)-now;
   return Math.max(0,Math.min(120000,delay || 0));
+}
+export function abortableSleep(ms,signal) {
+  if (signal?.aborted) return Promise.reject(signal.reason || new DOMException('Cancelled','AbortError'));
+  const delay=Math.max(0,Number(ms)||0);
+  if (delay===0) return Promise.resolve();
+  return new Promise((resolve,reject)=>{
+    const onAbort=()=>{clearTimeout(timer);reject(signal.reason || new DOMException('Cancelled','AbortError'));};
+    const timer=setTimeout(()=>{signal?.removeEventListener('abort',onAbort);resolve();},delay);
+    signal?.addEventListener('abort',onAbort,{once:true});
+  });
+}
+export async function withRetry(fn,{attempts=4,signal,onRetry,shouldRetry,baseDelay}={}) {
+  const maxAttempts=Math.max(1,Math.floor(Number(attempts)||1));
+  for (let attempt=1;;attempt++) {
+    if (signal?.aborted) throw signal.reason || new DOMException('Cancelled','AbortError');
+    try {
+      return await fn(attempt);
+    } catch (rawError) {
+      if (signal?.aborted) throw signal.reason || rawError;
+      const error=networkError(rawError);
+      const retryable=shouldRetry ? shouldRetry(error,attempt) : transientError(error);
+      if (attempt>=maxAttempts || !retryable) throw error;
+      const retryAfter=Math.min(120000,Math.max(0,Number(error?.retryAfter)||0));
+      const ms=baseDelay===undefined
+        ? retryDelay(attempt,retryAfter)
+        : Math.max(retryAfter,Math.min(120000,Math.round(Math.max(0,Number(baseDelay)||0) * 2 ** Math.min(7,attempt-1) * (1 + Math.random()*.2))));
+      await onRetry?.(attempt,ms,error);
+      await abortableSleep(ms,signal);
+    }
+  }
 }
 export async function waitForData(promise,controller,timeout=60000) {
   let timer,abort;

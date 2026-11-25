@@ -6,7 +6,7 @@ export function batchProgress(batch,tasks=[],records=[]) {
   const counts={remaining:Math.max(0,(batch.total || 0)-(batch.processed || 0)),waiting:0,active:0,paused:0,completed,failed:0};
   for(const task of own){
     if(task.status==='queued')counts.waiting++;
-    else if(task.status==='downloading')counts.active++;
+    else if(task.status==='downloading' || task.status==='retrying')counts.active++;
     else if(task.status==='paused')counts.paused++;
     else if(task.status==='error')counts.failed++;
   }
