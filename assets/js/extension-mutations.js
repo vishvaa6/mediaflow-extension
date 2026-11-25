@@ -1,6 +1,6 @@
 // Ignore changes made entirely by MediaFlow's own controls. Site changes on
 // their parents still count, including moving or removing a video player.
-const ownedSelector='.mediaflow-download-pill,.mediaflow-download-message,.mediaflow-download-status,.mediaflow-pick-tick,#mediaflow-profile-picker';
+const ownedSelector='.mediaflow-download-pill,.mediaflow-download-message,.mediaflow-download-status,.mediaflow-pick-tick,#mediaflow-profile-picker,.mediaflow-optics-defs,[data-mediaflow-glass-defs]';
 function owned(node){
   const element=node?.nodeType===1?node:node?.parentElement;
   return !!element?.closest?.(ownedSelector);

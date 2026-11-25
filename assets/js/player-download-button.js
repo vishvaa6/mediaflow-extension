@@ -2,6 +2,7 @@ import {expandHlsChoices} from './hls-playlist.js';
 import {icon} from './icons.js';
 import {videoKey} from './video-details.js';
 import {notifyIfContextInvalid} from './extension-context.js';
+import {ensureCspSafeGlassDefs} from './liquid-optics.js';
 
 const height=video=>Number(String(video.quality || '').match(/\d+/)?.[0]) || 0;
 const validVariants=videos=>videos.filter(video=>video?.videoUrl && ['mp4','webm','m3u8'].includes(video.format));
@@ -158,7 +159,7 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
   document.addEventListener('mediaflow:context-invalidated',showReconnect);
   const isInteracting=record=>Boolean(record?.pill?.matches?.(':hover,:focus-within') || record?.menu?.matches?.(':popover-open'));
   function removeControl(player,record){
-    clearTimeout(record.messageTimer);clearTimeout(record.removeTimer);record.removeTimer=0;
+    clearTimeout(record.messageTimer);clearTimeout(record.removeTimer);clearTimeout(record.tapTimer);record.removeTimer=0;record.tapTimer=0;
     if(record.glintFrame){cancelAnimationFrame(record.glintFrame);record.glintFrame=0;}
     record.glintMotion?.forEach(animation=>animation.cancel());
     record.pill.remove();record.message.remove();controls.delete(player);
@@ -179,6 +180,12 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
   function sync(entries){
     if(contextInvalid)return;
     latest=entries;
+    if(entries.length && document.documentElement){
+      ensureCspSafeGlassDefs(document.documentElement,'player',[
+        {id:'mf-clear-pill-lens',erode:2,blur:5,preBlur:0.4,scale:20,dispersion:0.14},
+        {id:'mf-regular-menu-lens',erode:3,blur:8,preBlur:0.9,scale:22,dispersion:0.12}
+      ]);
+    }
     const present=new Set();
     for(const entry of entries){
       const player=entry.element;
@@ -252,6 +259,20 @@ export function createPlayerDownloadButtons({variants,loadEntry,visiblePlayers,p
         },{passive:true});
         for(const name of ['pointerdown','mousedown','touchstart'])button.addEventListener(name,event=>event.stopPropagation());
         for(const node of [trigger,menu])for(const name of ['pointerdown','mousedown','touchstart','click','keydown','keyup'])node.addEventListener(name,event=>event.stopPropagation());
+        const pulsePill=event=>{
+          if(reducedMotion.matches)return;
+          const rect=pill.getBoundingClientRect();
+          if(!rect.width || !rect.height)return;
+          pill.style.setProperty('--mf-tap-x',`${Math.max(0,Math.min(100,(event.clientX-rect.left)/rect.width*100)).toFixed(1)}%`);
+          pill.style.setProperty('--mf-tap-y',`${Math.max(0,Math.min(100,(event.clientY-rect.top)/rect.height*100)).toFixed(1)}%`);
+          pill.removeAttribute('data-energized');
+          void pill.offsetWidth;
+          pill.setAttribute('data-energized','');
+          clearTimeout(record.tapTimer);
+          record.tapTimer=setTimeout(()=>pill.removeAttribute('data-energized'),380);
+        };
+        button.addEventListener('pointerdown',pulsePill,{passive:true});
+        trigger.addEventListener('pointerdown',pulsePill,{passive:true});
         button.addEventListener('click',event=>{event.preventDefault();event.stopImmediatePropagation();if(event.isTrusted)download(record);});
         menu.addEventListener('beforetoggle',event=>{
           const open=event.newState==='open';

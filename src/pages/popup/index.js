@@ -64,6 +64,14 @@ function render({resetProfileScroll = false} = {}) {
 
   container.innerHTML = `
     <div class="App">
+      <!-- Ambient refractive light-spill & artwork background field (popup/tab only) -->
+      <div class="liquid-ambient-stage" aria-hidden="true">
+        <span class="liquid-ambient-orb orb-a"></span>
+        <span class="liquid-ambient-orb orb-b"></span>
+        <span class="liquid-ambient-orb orb-c"></span>
+        <span class="liquid-ambient-art"></span>
+      </div>
+
       <!-- Toasts Container -->
       <div class="toast-container-modern" role="status" aria-live="polite" aria-atomic="true">
         ${state.toasts.map(toast => `
@@ -123,7 +131,7 @@ function render({resetProfileScroll = false} = {}) {
 
   seedRenderedProgressMarkup();
   bindEvents(container.querySelector('.App'));
-  liquidWorkspace.bind();
+  liquidWorkspace.bind({surface: popupSurface.surface, thumbnail: state.videoThumbnail});
   popupSurface.bindResize(document.getElementById('btn-resize-popup'));
   bindThumbnailFallbacks();
   if (state.activeTab === 'profile') updateProfileSelection();
